@@ -25,8 +25,9 @@ struct request {
 
 struct response_header_info {
     int message_body_index;
-    int content_length;
+    int content_length = 0;
     int found_content_length;
+    int status_code;
 };
 
 request parse_url_path(request request1, string URLpath){
@@ -63,11 +64,11 @@ request get_commandline_args(int argc, char** argv){
         request1.hostname = argv[1];
         request1 = parse_url_path(request1, argv[2]);
     }else{
-        cout << "Error: Missing Necessary Command Line Arguments" << "\n";
+        cerr << "Error: Missing Necessary Command Line Arguments" << "\n";
         exit(0);
     }
     if(argc > 3 && strcmp(argv[3], "-h") != 0){ //if there is a third command line argument and it is not -h, exit
-        cout << "Error: Third command line argument not supported" << "\n";
+        cerr << "Error: Third command line argument not supported" << "\n";
         exit(0);
     }else{
         if(argc < 4){
@@ -96,29 +97,20 @@ void print_request(request request1){
 
 void error_and_exit(string print_error){
 
-    cout << "bruh\n";
-
     int errnum;
     errnum = errno;
-    cout << print_error << "\n" << "errno: " << errnum << "\n";
+    cerr << print_error << "\n" << "errno: " << errnum << "\n";
 
     exit(0); 
 }
 
-response_header_info process_headers(char * received_message, bool header_flag){
+response_header_info process_headers(char * char_arr_headers, bool header_flag){
 
-    //check status code to see if its 200
-    string message = received_message;
     response_header_info response_info;
-    string headers;
-    if(message.find("\r\n\r\n") != std::string::npos){
-        response_info.message_body_index = message.find("\r\n\r\n")+4; //starting index of body is at \r\n\r\n + 4
-    }
-    headers = message.substr(0, response_info.message_body_index);
 
-    cout << headers;
+    string headers = char_arr_headers;
 
-    if(header_flag == true){
+    if(header_flag == true){ //print headers if -h flag and exit
         cout << headers;
         exit(0);
     }
@@ -148,10 +140,10 @@ response_header_info process_headers(char * received_message, bool header_flag){
             sscanf(tokens[i].c_str(), "%*s%d", &content_length);
             found_content_length = 1;
         }
-        if(tokens[i].find("Transfer-Encoding:") != std::string::npos){ //handle chunked encoding
+        if(tokens[i].find("Transfer-Encoding:") != std::string::npos || tokens[i].find("transfer-encoding:") != std::string::npos){ //handle chunked encoding
             sscanf(tokens[i].c_str(), "%*s%s", chunked_encoding);
             if(strcmp(chunked_encoding, "chunked") == 0){
-                cout << "Chunked encoding is not supported" << "\nExiting now...\n";
+                cerr << "Chunked encoding is not supported" << "\nExiting now...\n";
                 exit(0);
             }
         }
@@ -165,14 +157,9 @@ response_header_info process_headers(char * received_message, bool header_flag){
 
     // cout << "status code: "<< status_code << " content length: " << content_length << "\n";
 
-    //check if status code is 200, if not error code and exit
-    if(status_code != 200){
-        cout << headers;
-        cout << "server responded with status code: " << status_code << "\nExiting now...\n";
-        exit(0);
-    }else{
-        response_info.content_length = content_length;
-    }
+    response_info.status_code = status_code;
+
+    response_info.content_length = content_length;
 
     return response_info;
 }
@@ -185,8 +172,6 @@ void send_request(request request1){
     if(socketfd < 0){
         error_and_exit("Error creating socket");
     }
-
-    // print_request(request1);
 
     //create socket address structure
     struct sockaddr_in socstruct;
@@ -223,61 +208,65 @@ void send_request(request request1){
     //read incoming message
     char received_message[BUFFERLENGTH];
     int n = 0;
-    int bytes_read = 0;
     int body_bytes_read = 0;
-    int processed_headers = 0;
+    int got_all_headers = 0;
+    int header_index = 0;
     int copy_from_here_on = 0;
+    char headers[8192];
+    char end_of_headers[5] = "\r\n\r\n";
     response_header_info response_info;
     bzero(received_message,BUFFERLENGTH);
     ofstream myfile;
     myfile.open("output.dat");
-    while ((n = read(socketfd, received_message, BUFFERLENGTH - 1)) > 0){
+    while ((n = read(socketfd, received_message, BUFFERLENGTH - 1)) >= 0){
         if(n < 0){
             error_and_exit("Read error");
         }
-        if(processed_headers == 0){
-            response_info = process_headers(received_message, request1.header_flag);
-            cout << "content length: " << response_info.content_length << " starting index: " << response_info.message_body_index << "\n";
-            processed_headers = 1;
+        if(got_all_headers == 0){ //get headers
+            for(int i = 0; i < n; i++){
+                headers[header_index] = received_message[i];
+                header_index++;
+                if(strstr(headers, end_of_headers) != NULL){
+                    response_info = process_headers(headers, request1.header_flag);
+                    // cout << headers;
+                    // cout << "content length: " << response_info.content_length << " status code: " << response_info.status_code << "\n";
+                    got_all_headers = 1;
+                    break;
+                }
+            }
         }
-        for(int i = 0; i < n; i++){
-            if(response_info.found_content_length == 1){
-                if(bytes_read == response_info.message_body_index && copy_from_here_on == 0){
-                    bytes_read = -1; //reset bytes read to 0, so that it can start counting the message body length
-                    copy_from_here_on = 1;
-                }
-                if(copy_from_here_on == 1){
-                    if(body_bytes_read != response_info.content_length){
-                        // printf("%c", received_message[i]);
-                        myfile << received_message[i];
-                        body_bytes_read++;
-                        if(body_bytes_read == response_info.content_length){ //finished all body bytes, return to function
-                            myfile.close();
-                            close(socketfd);
-                            return;
-                        }
-                    }
-                }
-            }else{
-                //read everything into file until EOF.
-                if(n == 0){
-                    myfile.close();
-                    close(socketfd);
-                    return;
-                }
-                if(bytes_read == response_info.message_body_index && copy_from_here_on == 0){
+        if(got_all_headers == 1){ //if already got headers, get body
+            if(response_info.content_length == 0 && response_info.status_code != 200){
+                cerr << "server responded with status code: " << response_info.status_code << " (no content length)\nExiting now...\n";
+                myfile.close();
+                close(socketfd);
+                exit(0);
+            }
+            if(response_info.found_content_length == 0 && response_info.status_code != 200){
+                cerr << "server responded with status code: " << response_info.status_code << "\nExiting now...\n";
+                myfile.close();
+                close(socketfd);
+                exit(0);
+            }
+            for(int i = 0; i < n; i++){
+                if(i == header_index && copy_from_here_on == 0){ //start at the end of the headers
                     copy_from_here_on = 1;
                 }
                 if(copy_from_here_on == 1){
                     myfile << received_message[i];
+                    body_bytes_read++;
+                    if(body_bytes_read == response_info.content_length){
+                        myfile.close();
+                        close(socketfd);
+                        return;
+                    }
                 }
             }
-            // cout << "Bytes read: " << bytes_read << "\n";
-            bytes_read++;
         }
         bzero(received_message,BUFFERLENGTH); //zero out buffer
     }
 
+    close(socketfd);
     myfile.close();
     return;
 }
@@ -288,7 +277,7 @@ int main(int argc, char** argv)
     request request1;
     request1 = get_commandline_args(argc, argv);
 
-    print_request(request1);
+    // print_request(request1);
     
     send_request(request1);
 
