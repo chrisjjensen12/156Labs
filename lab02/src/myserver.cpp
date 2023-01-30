@@ -24,13 +24,12 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen){
             cerr << "recvfrom() failed.\n Exiting now.\n";
             exit(EXIT_FAILURE);
         }
-        cout << mesg;
         s = sendto(sockfd, mesg, n, 0, pcliaddr, len); //sends it back to sender
         if(s < 0){
             cerr << "sendto() failed.\n Exiting now.\n";
             exit(EXIT_FAILURE);
         }
-        cout << mesg;
+        // cout << mesg;
     }
 
 }
