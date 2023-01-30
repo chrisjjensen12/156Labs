@@ -18,6 +18,7 @@ int packet_counter = 0;
 int bytes_read_from_echo = 0;
 int bytes_read_from_in_file = 0;
 int bytes_put_in_payload = 0;
+int bytes_sent_to_server = 0;
 
 struct server_info {
     string server_IP;
@@ -132,7 +133,7 @@ server_info get_commandline_args(int argc, char** argv){
 
 }
 
-void send_packet_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, char *packet, int mtu, char* echoed_packet, int bytes_in_packet){
+void send_packet_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string packet, int mtu, char* echoed_packet, int bytes_in_packet){
 
     int n = 0;
     int s = 0;
@@ -140,15 +141,20 @@ void send_packet_to_server(int sockfd, const sockaddr *pservaddr, socklen_t serv
     tv.tv_sec = 60; //60s timeout
     tv.tv_usec = 0;
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); //set timeout 
-    s = sendto(sockfd, packet, bytes_in_packet, 0, pservaddr, servlen);
+    s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
     if(s < 0){
         error_and_exit("sendto() failed.");
     }
-    n = recvfrom(sockfd, echoed_packet, BUFFERLENGTH, 0, NULL, NULL);
+    n = recvfrom(sockfd, echoed_packet, mtu, 0, NULL, NULL);
+
+    if(s != n){
+        error_and_exit("Sent packet does not equal recieved packet");
+    }
+
     if(n < 0){
         if(errno == EINTR){
             //interrupted call, try sending packet again
-            recvfrom(sockfd, echoed_packet, BUFFERLENGTH, 0, NULL, NULL);
+            recvfrom(sockfd, echoed_packet, mtu, 0, NULL, NULL);
         }else if(errno == EAGAIN){
             //server timed out
             error_and_exit("Cannot detect server");
@@ -164,7 +170,7 @@ void send_packet_to_server(int sockfd, const sockaddr *pservaddr, socklen_t serv
 
 }
 
-void parse_echoed_packet(char* echoed_packet, int mtu, int out_fd, int bytes_in_packet){
+void parse_echoed_packet(char* echoed_packet, int mtu, FILE * outFile, int bytes_in_packet){
 
     char payload[mtu];
     int packet_num = 0;
@@ -184,14 +190,15 @@ void parse_echoed_packet(char* echoed_packet, int mtu, int out_fd, int bytes_in_
             start_reading_flag = 1;
         }
         if(start_reading_flag == 1){
-            payload[j] = echoed_packet[i];
+            // payload[j] = echoed_packet[i];
+            fputc(echoed_packet[i], outFile);
             j++;
             bytes_read_from_echo++;
         }
     }
     
     // cout << packet_num << "\n";
-    write(out_fd, payload, j);
+    // write(out_fd, payload, j);
     // cout << payload;
 
     bzero(&echoed_packet, sizeof(echoed_packet));
@@ -202,7 +209,7 @@ void parse_echoed_packet(char* echoed_packet, int mtu, int out_fd, int bytes_in_
 }
 
 
-void do_client_processing(int in_fd, int out_fd, int sockfd, const sockaddr *pservaddr, socklen_t servlen, int mtu){
+void do_client_processing(int in_fd, FILE * outFile, int sockfd, const sockaddr *pservaddr, socklen_t servlen, int mtu){
 
 
     if(overhead_len >= mtu){ //check mtu
@@ -222,6 +229,8 @@ void do_client_processing(int in_fd, int out_fd, int sockfd, const sockaddr *pse
     bzero(&data, sizeof(data));
     bzero(&packet, sizeof(packet));
 
+    string packet1;
+
     while ((n = read(in_fd, data, mtu-overhead_len)) >= 0) { //splits file into mtu-overhead sized chunks
         bytes_read_from_in_file += n;
         if(n < 0){
@@ -235,15 +244,17 @@ void do_client_processing(int in_fd, int out_fd, int sockfd, const sockaddr *pse
         //prepare packet by adding overhead and data payload
         bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nPayload:\n", packet_num);
         bytes_in_packet += n; //add bytes from data portion
-        // Copy the first part
-        memcpy(packet, first_part, sizeof(char) * strlen(first_part));
-        // Add the binary data
-        memcpy(&packet[sizeof(char) * strlen(first_part)], data, n);
+        // // Copy the first part
+        // memcpy(packet, first_part, sizeof(char) * strlen(first_part));
+        // // Add the binary data
+        // memcpy(&packet[sizeof(char) * strlen(first_part)], data, n);
+        packet1 = first_part;
+        packet1.append(data, n);
 
         //send packet to server
-        send_packet_to_server(sockfd, pservaddr, servlen, packet, mtu, echoed_packet, bytes_in_packet);
+        send_packet_to_server(sockfd, pservaddr, servlen, packet1, mtu, echoed_packet, bytes_in_packet);
 
-        parse_echoed_packet(echoed_packet, mtu, out_fd, bytes_in_packet);
+        parse_echoed_packet(echoed_packet, mtu, outFile, bytes_in_packet);
         
         bytes_in_packet = 0;
         // cout << packet;
@@ -255,7 +266,6 @@ void do_client_processing(int in_fd, int out_fd, int sockfd, const sockaddr *pse
     }
 
     close(in_fd);
-    close(out_fd);
 
 }
 
@@ -294,20 +304,46 @@ int main(int argc, char** argv)
         error_and_exit("Error opening file at in_file_path");
     }
 
-    int out_fd;
-    out_fd = open(info.out_file_path.c_str(), O_WRONLY | O_CREAT);
-    if(out_fd < 0){
+    // FILE * inFile;
+    // inFile = fopen (info.in_file_path.c_str(),"r");
+    // if (inFile!=NULL)
+    // {
+    //     fclose(inFile);
+    //     error_and_exit("Error opening file at in_file_path");
+    // }
+
+    // int out_fd;
+    // out_fd = open(info.out_file_path.c_str(), O_WRONLY | O_CREAT);
+    // if(out_fd < 0){
+    //     error_and_exit("Error opening file at out_file_path");
+    // }
+
+    FILE * outFile;
+    outFile = fopen(info.out_file_path.c_str(),"w");
+    if (outFile==NULL)
+    {
+        fclose(outFile);
         error_and_exit("Error opening file at out_file_path");
     }
 
-    do_client_processing(in_fd, out_fd, sockfd, (sockaddr *) &servaddr, sizeof(servaddr), info.mtu);
 
+    do_client_processing(in_fd, outFile, sockfd, (sockaddr *) &servaddr, sizeof(servaddr), info.mtu);
+
+    fclose(outFile);
     close(in_fd);
-    close(out_fd);
+
+    struct stat so;
+
+    if (stat(info.out_file_path.c_str(), &so) == -1) {
+        error_and_exit("stat() error");
+    }
+    else {
+            cout << "Out file size: " << (long long) so.st_size << " bytes\n";
+    }
 
     cout << "Bytes read from echo payloads: " << bytes_read_from_echo << "\n";
     cout << "Bytes read from in file: " << bytes_read_from_in_file << "\n";
-    cout << "Bytes put in payload (strlen): " << bytes_put_in_payload << "\n";
+    cout << "Bytes put in payload: " << bytes_put_in_payload << "\n";
 
     return 0;
 }
