@@ -12,8 +12,7 @@
 #include <fstream>
 
 using namespace std;
-#define BUFFERLENGTH 4096
-int overhead_len = 40;
+int overhead_len = 60;
 int packet_counter = 0; 
 int bytes_read_from_echo = 0;
 int bytes_read_from_in_file = 0;
@@ -22,8 +21,8 @@ int bytes_sent_to_server = 0;
 
 struct server_info {
     string server_IP;
-    uint16_t server_port;
-    uint16_t mtu;
+    int server_port;
+    int mtu;
     string in_file_path;
     string out_file_path;
 };
@@ -70,21 +69,25 @@ server_info get_commandline_args(int argc, char** argv){
         error_and_exit("Please use a numerical port number");
     }
     else {
-        if(converted_port > 65536){ //check if port is not greater than 2^16
-            error_and_exit("Port number should not be larger than 2^16");
-        }
         info.server_port = converted_port;
     }
 
+    if(info.server_port <= 1024){
+        error_and_exit("Port number should be greater than 1024, and less than 65536");
+    }else if(info.server_port >= 65536){
+        error_and_exit("Port number should be greater than 1024, and less than 65536");
+    }
+
     //check if mtu is integer
-    char* g;
-    long converted_mtu = strtol(argv[3], &g, 10);
-    if (*g) {
-        error_and_exit("Please use a numerical mtu number");
+    info.mtu = 0;
+    if (isdigit(argv[3][0]))
+    {
+        info.mtu = stoi(argv[3]);
+    }else{
+        error_and_exit("Please enter a numerical mtu value");
     }
-    else {
-        info.mtu = converted_mtu;
-    }
+
+    cout << info.mtu << "\n";
 
     //check if infile exists. If not, exit with error. 
     struct stat buffer;
@@ -147,10 +150,6 @@ void send_packet_to_server(int sockfd, const sockaddr *pservaddr, socklen_t serv
     }
     n = recvfrom(sockfd, echoed_packet, mtu, 0, NULL, NULL);
 
-    if(s != n){
-        error_and_exit("Sent packet does not equal recieved packet");
-    }
-
     if(n < 0){
         if(errno == EINTR){
             //interrupted call, try sending packet again
@@ -167,6 +166,11 @@ void send_packet_to_server(int sockfd, const sockaddr *pservaddr, socklen_t serv
         }
     }
 
+    // if(s != n){
+    //     cerr << "Error! Bytes sent to server: " << s << " Bytes received from server: " << n << "\n";
+    //     error_and_exit("Sent packet # of bytes does not equal recieved packet # of bytes");
+
+    // }
 
 }
 
@@ -179,8 +183,11 @@ void parse_echoed_packet(char* echoed_packet, int mtu, FILE * outFile, int bytes
 
     sscanf(echoed_packet, "%*s %*s %d %*s %*s", &packet_num);
 
+    // cout << "packet counter: " << packet_counter << " Packet num: " << packet_num << "\n";
+
+
     if(packet_counter != packet_num){
-        error_and_exit("Encountered a wrong packet sequence number");
+        error_and_exit("Packet loss detected");
     }
 
     int start_reading_flag = 0;
@@ -190,13 +197,14 @@ void parse_echoed_packet(char* echoed_packet, int mtu, FILE * outFile, int bytes
             start_reading_flag = 1;
         }
         if(start_reading_flag == 1){
-            // payload[j] = echoed_packet[i];
-            fputc(echoed_packet[i], outFile);
+            payload[j] = echoed_packet[i];
+            // fputc(echoed_packet[i], outFile);
             j++;
             bytes_read_from_echo++;
         }
     }
     
+    fwrite(payload, sizeof(char), j, outFile);
     // cout << packet_num << "\n";
     // write(out_fd, payload, j);
     // cout << payload;
@@ -211,10 +219,12 @@ void parse_echoed_packet(char* echoed_packet, int mtu, FILE * outFile, int bytes
 
 void do_client_processing(int in_fd, FILE * outFile, int sockfd, const sockaddr *pservaddr, socklen_t servlen, int mtu){
 
-
-    if(overhead_len >= mtu){ //check mtu
-        error_and_exit("Required minimum MTU is 41");
+    if(overhead_len >= mtu){ //check mtu can at least send one byte with overhead
+        error_and_exit("Required minimum MTU is 61");
+    }else if(mtu >= 32000){ //check that the mtu is less than 32000
+        error_and_exit("MTU must be less than 32000");
     }
+
 
     int n;
     char data[mtu-overhead_len+1];
@@ -242,14 +252,12 @@ void do_client_processing(int in_fd, FILE * outFile, int sockfd, const sockaddr 
         }
 
         //prepare packet by adding overhead and data payload
-        bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nPayload:\n", packet_num);
+        bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nLen: %d\r\n\r\nPayload:\n", packet_num, n);
         bytes_in_packet += n; //add bytes from data portion
-        // // Copy the first part
-        // memcpy(packet, first_part, sizeof(char) * strlen(first_part));
-        // // Add the binary data
-        // memcpy(&packet[sizeof(char) * strlen(first_part)], data, n);
         packet1 = first_part;
         packet1.append(data, n);
+
+        // cout << packet1;
 
         //send packet to server
         send_packet_to_server(sockfd, pservaddr, servlen, packet1, mtu, echoed_packet, bytes_in_packet);
@@ -258,6 +266,7 @@ void do_client_processing(int in_fd, FILE * outFile, int sockfd, const sockaddr 
         
         bytes_in_packet = 0;
         // cout << packet;
+        packet1.clear();  
         bzero(&first_part, sizeof(first_part));
         bzero(&echoed_packet, sizeof(echoed_packet));
         bzero(&data, sizeof(data)); //zero out data for next read
@@ -343,7 +352,6 @@ int main(int argc, char** argv)
 
     cout << "Bytes read from echo payloads: " << bytes_read_from_echo << "\n";
     cout << "Bytes read from in file: " << bytes_read_from_in_file << "\n";
-    cout << "Bytes put in payload: " << bytes_put_in_payload << "\n";
 
     return 0;
 }

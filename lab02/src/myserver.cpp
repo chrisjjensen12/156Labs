@@ -6,9 +6,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h> 
 #include <unistd.h>
+#include <sstream>
 
 using namespace std;
-#define BUFFERLENGTH 4096
+#define BUFFERLENGTH 32000 //max mtu for client
 
 void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen){
 
@@ -17,7 +18,9 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen){
     socklen_t len;
     char mesg[BUFFERLENGTH];
 
-    for(;;){
+    string packet;
+
+   for(;;){
         len = clilen;
         n = recvfrom(sockfd, mesg, BUFFERLENGTH, 0, pcliaddr, &len); //reads datagram
         if(n < 0){
@@ -35,21 +38,29 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen){
 }
 
 uint16_t get_port(int argc, char** argv){
-    uint16_t port_num = 0;
+    int port_num = 0;
     //check for correct amount of command line arguments
     if(argc > 2){ 
         cerr << "Too many command line arguments.\nFormat: ./myserver port_number\n";
         exit(EXIT_FAILURE);
     }
-    //check if port is integer
-    char* p;
-    long converted = strtol(argv[1], &p, 10);
-    if (*p) {
+
+    string port_num_string = argv[1];
+    //check if mtu is integer
+    if (isdigit(port_num_string[0]))
+    {
+        port_num = stoi(port_num_string);
+    }else{
         cerr << "Please use a correct port number. Exiting now.\n";
         exit(EXIT_FAILURE);
     }
-    else {
-        port_num = converted;
+
+    if(port_num <= 1024){
+        cerr << "Port number should be greater than 1024, and less than 65536\n";
+        exit(EXIT_FAILURE);
+    }else if(port_num >= 65536){
+        cerr << "Port number should be greater than 1024, and less than 65536\n";
+        exit(EXIT_FAILURE);
     }
 
     return port_num;
