@@ -5,7 +5,7 @@ Date: Jan 19, 2023
 List of files:
 
 1. README.txt:
-    -This info files
+    -This info file
 
 2. Makefile:
     -Located in the top directory, execute "make" to comple files and generate a binary. 
