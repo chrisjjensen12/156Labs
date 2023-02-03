@@ -87,8 +87,6 @@ server_info get_commandline_args(int argc, char** argv){
         error_and_exit("Please enter a numerical mtu value");
     }
 
-    cout << info.mtu << "\n";
-
     //check if infile exists. If not, exit with error. 
     struct stat buffer;
     int status;
@@ -304,7 +302,7 @@ int main(int argc, char** argv)
         error_and_exit("stat() error");
     }
     else {
-            cout << "In file size: " << (long long) sb.st_size << " bytes\n";
+            // cout << "In file size: " << (long long) sb.st_size << " bytes\n";
     }
 
     int in_fd;
@@ -312,20 +310,6 @@ int main(int argc, char** argv)
     if(in_fd < 0){
         error_and_exit("Error opening file at in_file_path");
     }
-
-    // FILE * inFile;
-    // inFile = fopen (info.in_file_path.c_str(),"r");
-    // if (inFile!=NULL)
-    // {
-    //     fclose(inFile);
-    //     error_and_exit("Error opening file at in_file_path");
-    // }
-
-    // int out_fd;
-    // out_fd = open(info.out_file_path.c_str(), O_WRONLY | O_CREAT);
-    // if(out_fd < 0){
-    //     error_and_exit("Error opening file at out_file_path");
-    // }
 
     FILE * outFile;
     outFile = fopen(info.out_file_path.c_str(),"w");
@@ -341,17 +325,17 @@ int main(int argc, char** argv)
     fclose(outFile);
     close(in_fd);
 
-    struct stat so;
+    // struct stat so;
 
-    if (stat(info.out_file_path.c_str(), &so) == -1) {
-        error_and_exit("stat() error");
-    }
-    else {
-            cout << "Out file size: " << (long long) so.st_size << " bytes\n";
-    }
+    // if (stat(info.out_file_path.c_str(), &so) == -1) {
+    //     error_and_exit("stat() error");
+    // }
+    // else {
+    //         cout << "Out file size: " << (long long) so.st_size << " bytes\n";
+    // }
 
-    cout << "Bytes read from echo payloads: " << bytes_read_from_echo << "\n";
-    cout << "Bytes read from in file: " << bytes_read_from_in_file << "\n";
-
+    // cout << "Bytes read from echo payloads: " << bytes_read_from_echo << "\n";
+    // cout << "Bytes read from in file: " << bytes_read_from_in_file << "\n";
+     
     return 0;
 }
