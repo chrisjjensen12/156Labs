@@ -12,6 +12,11 @@
 #include <fstream>
 using namespace std;
 
+
+//go back n pointers
+int basesn = 0;
+int nextsn = 0;
+
 int overhead_len = 40;
 int bytes_read_from_in_file = 0;
 int in_file_size = 0;
@@ -164,7 +169,7 @@ int check_and_open_in_file(server_info info){
 
 //########################### Client Processing ###########################
 
-void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path){
+void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path, int ender_or_header){
 
     int n = 0;
     int s = 0;
@@ -172,7 +177,15 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
     tv.tv_sec = 60; //60s timeout
     tv.tv_usec = 0;
     char ackbuffer[5000];
-    string packet = "INFORMATION_PACKET_ID\r\n\r\nout_file_path: ";
+    bzero(&ackbuffer, sizeof(ackbuffer));
+    string packet;
+    if(ender_or_header == 1){
+        cout << "sending header packet...\n";
+        packet = "INFORMATION_PACKET_ID\r\n\r\nout_file_path: ";
+    }else{
+        cout << "sending ender packet...\n";
+        packet = "ENDER_PACKET\r\n\r\nout_file_path: ";
+    }
     packet.append(out_file_path);
     // cout << packet << "\n";
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); //set timeout 
@@ -182,7 +195,7 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
     }
     n = recvfrom(sockfd, ackbuffer, 5000, 0, NULL, NULL);
 
-    cout << ackbuffer;
+    cout << ackbuffer << "\n";
 
     if(n < 0){
         if(errno == EINTR){
@@ -200,6 +213,8 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
         }
     }
 
+    return;
+
 }
 
 void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, socklen_t servlen, int mtu, int winsz, string out_file_path){
@@ -211,8 +226,10 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     }
 
     //send information about the file thats about to be sent, including the out file path that the server needs to make
-    send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path);
+    send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 1);
+    //TODO: wait for ack and retransmit if needed
 
+    int s;
     int n;
     char data[mtu-overhead_len+1];
     int packet_num = 0;
@@ -234,6 +251,9 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
         }
 
         if(n == 0){ //eof
+            //send ender packet
+            send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+            //TODO: wait for ack and retransmit if needed
             break;
         }
 
@@ -245,8 +265,11 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 
         // cout << packet;
 
-        //send packet to server
-        // send_packet_to_server(sockfd, pservaddr, servlen, packet, mtu, echoed_packet, bytes_in_packet);
+        // send packet to server
+        s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
+        if(s < 0){
+            error_and_exit("sendto() failed.");
+        }
         
         bytes_in_packet = 0;
         packet.clear();  
