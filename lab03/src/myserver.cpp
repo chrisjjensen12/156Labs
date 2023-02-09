@@ -317,7 +317,7 @@ vector<client_info> parse_packet_for_payload(string packet, vector<client_info> 
 
             sscanf(packet.c_str(), "%*s %*s %d %*s %*s", &packet_num);
 
-            cout << "packet seq num: " << packet_num << "\n";
+            cout << "packet seq num (from client): " << packet_num << " server-tracked seq num: " << client->sequence_num << "\n";
 
             //if sequence number sent in payload does not match server-tracked sequence number
             if(client->sequence_num != packet_num){
