@@ -19,6 +19,8 @@ struct client_info{
     FILE* outfile;
     sockaddr *pcliaddr;
     int sequence_num;
+    int num_bytes_in_file;
+    int bytes_written_to_file;
 };
 
 struct server_info{
@@ -187,6 +189,7 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
     struct client_info new_client;
     char out_file_path[100];
     char mesg[11] = "HEADER ACK";
+    int file_size = 0;
     //look for initial information packet from client
     std::size_t found = packet.find("INFORMATION_PACKET_ID");
     if (found!=std::string::npos){
@@ -194,7 +197,9 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
         if(found == 0){
             cout << "got header packet\n";
             //get out_file_path from packet
-            sscanf(packet.c_str(), "%*s %*s %s", out_file_path);
+            sscanf(packet.c_str(), "%*s %*s %s %*s %d", out_file_path, &file_size);
+
+            cout << "file_size: " << file_size << "\n";
             //send to function to make directory
             make_outfile_dir(out_file_path);
 
@@ -205,6 +210,8 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
             new_client.outfile = outFile;
             new_client.pcliaddr = pcliaddr;
             new_client.sequence_num = 0;
+            new_client.num_bytes_in_file = file_size;
+            new_client.bytes_written_to_file = 0;
 
             //push client info struct to vector and return
             client_vector_copy.push_back(new_client);
@@ -223,9 +230,6 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
     return client_vector_copy;
 }
 
-bool IsEqual (sockaddr *vecpcliaddr, sockaddr *pcliaddr) {
-  return (vecpcliaddr == pcliaddr);
-}
 
 vector<client_info> parse_packet_for_ender(string packet, vector<client_info> client_vector, int sockfd, sockaddr *pcliaddr, socklen_t len){
 
@@ -317,7 +321,7 @@ vector<client_info> parse_packet_for_payload(string packet, vector<client_info> 
 
             //if sequence number sent in payload does not match server-tracked sequence number
             if(client->sequence_num != packet_num){
-                //drop packet, client needs to resend
+                //drop packet, client needs to resend. Just return back to main loop and dont process packet
                 cout << "out of order packet detected: " << packet_num << "\n";
                 return client_vector_copy;
             }
@@ -336,9 +340,34 @@ vector<client_info> parse_packet_for_payload(string packet, vector<client_info> 
                     bytes_read_from_payload++;
                 }
             }
+
+            client->bytes_written_to_file = client->bytes_written_to_file+j;
             
             fwrite(payload, sizeof(char), j, client->outfile);
             bzero(&payload, sizeof(payload));
+
+            //construct ack to send, if its the last packet we needed, send a 1 to let the client know it can stop
+            string mesg = "ACK_SEQ_NUM: ";
+            if(client->bytes_written_to_file == client->num_bytes_in_file){
+                string seq_num = to_string(packet_num);
+                mesg.append(seq_num);
+                mesg.append("\r\n\r\nLAST_ACK: ");
+                mesg.append("1");
+            }else{
+                string seq_num = to_string(packet_num);
+                mesg.append(seq_num);
+                mesg.append("\r\n\r\nLAST_ACK: ");
+                mesg.append("0");
+                //TODO: now we can close file
+            }
+
+            int s;
+            //send ack back to client
+            s = sendto(sockfd, mesg.c_str(), mesg.length(), 0, pcliaddr, len); 
+            if(s < 0){
+                cerr << "sendto() failed.\n Exiting now.\n";
+                exit(EXIT_FAILURE);
+            }
 
             //increment payload packets written to file
             client->sequence_num = client->sequence_num + 1; 

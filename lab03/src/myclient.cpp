@@ -17,9 +17,17 @@ using namespace std;
 int basesn = 0;
 int nextsn = 0;
 
+
+
+int last_ack = 0;
 int overhead_len = 40;
 int bytes_read_from_in_file = 0;
 int in_file_size = 0;
+
+struct packet_in_window{
+    string packet;
+    int has_packet_been_sent;
+};
 
 struct server_info {
     string server_IP;
@@ -182,11 +190,15 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
     if(ender_or_header == 1){
         cout << "sending header packet...\n";
         packet = "INFORMATION_PACKET_ID\r\n\r\nout_file_path: ";
+        packet.append(out_file_path);
+        packet.append("\r\n\r\nbytes_in_file: ");
+        string in_file_size_str = to_string(in_file_size);
+        packet.append(in_file_size_str);
     }else{
         cout << "sending ender packet...\n";
         packet = "ENDER_PACKET\r\n\r\nout_file_path: ";
+        packet.append(out_file_path);
     }
-    packet.append(out_file_path);
     // cout << packet << "\n";
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); //set timeout 
     s = sendto(sockfd, packet.c_str(), 5000, 0, pservaddr, servlen);
@@ -231,50 +243,69 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 
     int s;
     int n;
+    int ack_n;
+    int ack_seq_num = 0;
     char data[mtu-overhead_len+1];
     int packet_num = 0;
-    char echoed_packet[mtu];
     char first_part[overhead_len+1];
     int bytes_in_packet = 0;
 
     bzero(&first_part, sizeof(first_part));
-    bzero(&echoed_packet, sizeof(echoed_packet));
     bzero(&data, sizeof(data));
 
     string packet;
+    char ack_buffer[2048];
 
-    //read file and split into mtu sized packets
-    while ((n = read(in_fd, data, mtu-overhead_len)) >= 0) { //splits file into mtu-overhead sized chunks
+    struct packet_in_window window[winsz];
+
+    //while the last ack has not been received from server, keep sending packets and looking for acks
+    while (last_ack != 1) {
+
+        //get a new packet
+        n = read(in_fd, data, mtu-overhead_len); //splits file into mtu-overhead sized chunks
         bytes_read_from_in_file += n;
         if(n < 0){
             error_and_exit("Read() error");
         }
-
         if(n == 0){ //eof
             //send ender packet
-            send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+            // send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
             //TODO: wait for ack and retransmit if needed
-            break;
+            // break;
         }
 
-        //prepare packet by adding overhead and data payload
-        bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nPayload:\n", packet_num);
-        bytes_in_packet += n; //add bytes from data portion
-        packet = first_part;
-        packet.append(data, n);
+        if(n != 0){
+            //prepare packet by adding overhead and data payload
+            bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nPayload:\n", packet_num);
+            bytes_in_packet += n; //add bytes from data portion
+            packet = first_part;
+            packet.append(data, n);
 
-        // cout << packet;
+            // cout << packet;
 
-        // send packet to server
-        s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
-        if(s < 0){
-            error_and_exit("sendto() failed.");
+            // send packet to server
+            s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
+            if(s < 0){
+                error_and_exit("sendto() failed.");
+            }
+        }
+
+        //call a nonblocking recvfrom to get any available acks from server
+        ack_n = recvfrom(sockfd, ack_buffer, 2048, MSG_DONTWAIT, NULL, NULL);
+
+        //got a packet
+        if(ack_n != -1){
+            sscanf(ack_buffer, "%*s %d %*s %d", &ack_seq_num, &last_ack);
+            cout << "Got ack for seq num: " << ack_seq_num << " last ack: " << last_ack << "\n";
+            if(last_ack == 1){
+                send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+            }
         }
         
         bytes_in_packet = 0;
-        packet.clear();  
+        packet.clear(); 
+        bzero(&ack_buffer, sizeof(ack_buffer));
         bzero(&first_part, sizeof(first_part));
-        bzero(&echoed_packet, sizeof(echoed_packet));
         bzero(&data, sizeof(data)); //zero out data for next read
         packet_num++;
     }
