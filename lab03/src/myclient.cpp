@@ -21,6 +21,8 @@ using namespace std;
 int basesn = 0;
 int nextsn = 0;
 int timeout = 0;
+int basesn_packet_resent_number = 0;
+int basesn_seq_num = 0;
 
 int last_ack = 0;
 int overhead_len = 60;
@@ -36,6 +38,12 @@ struct server_info {
     string out_file_path;
 };
 
+struct packet_info{
+    string packet;
+    int seq_num;
+    int bytes_in_packet;
+};
+
 struct socket_info {
     int sockfd;
     struct sockaddr_in servaddr;
@@ -46,6 +54,10 @@ struct socket_info {
 void sig_handler(int signum){
  
   printf("Triggered timeout!\n");
+
+  timeout = 1;
+
+  return;
 }
 
 void error_and_exit(string print_error){
@@ -232,15 +244,6 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
 
 }
 
-string construct_packet(){
-
-    string packet;
-
-
-
-
-    return packet;
-}
 
 void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, socklen_t servlen, int mtu, int winsz, string out_file_path){
 
@@ -270,7 +273,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     string packet;
     char ack_buffer[2048];
 
-    list<string> window;
+    list<packet_info> window;
 
     //while the last ack has not been received from server, keep sending packets and looking for acks
     while (last_ack != 1) {
@@ -290,6 +293,8 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
             }
 
             if(n != 0){
+
+                struct packet_info new_packet;
                 //prepare packet by adding overhead and data payload
                 bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nLen: %d\r\n\r\nPayload:\n", packet_num, n);
                 bytes_in_packet += n; //add bytes from data portion
@@ -308,13 +313,20 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 //increment nextsn
                 nextsn++;
 
+                new_packet.bytes_in_packet = bytes_in_packet;
+                new_packet.packet = packet;
+                new_packet.seq_num = packet_num;
+
                 //if vector is full, pop off the front and add new packet
                 if((int)window.size() == winsz){
                     window.pop_front();
-                    window.push_back(packet);
+                    window.push_back(new_packet);
                 }else{
-                    window.push_back(packet);
+                    window.push_back(new_packet);
                 }
+
+                //set in case of timeout
+                basesn_seq_num = window.front().seq_num;
 
                 if(initial_timer == 0){
                     // cout << "start inital timer\n";
@@ -325,6 +337,33 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 packet_num++;
             }
 
+        }
+
+        //handle a timeout
+        if(timeout){
+            //check for if packet at basesn has been here before
+            if(basesn_seq_num == window.front().seq_num){
+                basesn_packet_resent_number++;
+            }else{
+                basesn_packet_resent_number = 0;
+            }
+            if(basesn_packet_resent_number == 4){
+                error_and_exit("Resent same packet too many times, exiting now");
+            }
+            cout << "packet at basesn should be: " << window.front().seq_num << "\n";
+            //re-send packets in window 
+            cout << "resending packets currently in window\n";
+            for (auto const &i: window) {
+                cout << "resending packet: " << i.seq_num << ", bytes in packet: " << i.bytes_in_packet << "\n";
+                s = sendto(sockfd, i.packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
+                if(s < 0){
+                    error_and_exit("sendto() failed.");
+                }
+            }
+
+            //reset timer
+            alarm(3);
+            timeout = 0;
         }
 
         //call a nonblocking recvfrom to get any available acks from server
@@ -347,7 +386,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 alarm(0);
             }else{
                 // cout << "start timer\n";
-                alarm(4);
+                alarm(3);
             }
         }
         

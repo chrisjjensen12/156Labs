@@ -15,6 +15,12 @@
 using namespace std;
 #define BUFFERLENGTH 32000 //max mtu for client
 
+struct droppc_settings{
+    float droppc_decimal;
+    float rand_number;
+    int droppc_mode;
+};
+
 struct client_info{
     FILE* outfile;
     sockaddr *pcliaddr;
@@ -311,6 +317,8 @@ void send_ack(vector<client_info>::iterator client, int packet_num, int sockfd, 
     }
 
     int s;
+
+    cout << "sending ACK seq num: " << packet_num << "\n";
     //send ack back to client
     s = sendto(sockfd, mesg.c_str(), mesg.length(), 0, pcliaddr, len); 
     if(s < 0){
@@ -318,11 +326,10 @@ void send_ack(vector<client_info>::iterator client, int packet_num, int sockfd, 
         exit(EXIT_FAILURE);
     } 
 
-
     return;
 }
 
-vector<client_info> parse_packet_for_payload(char* char_packet, string packet, vector<client_info> client_vector, int sockfd, sockaddr *pcliaddr, socklen_t len){
+vector<client_info> parse_packet_for_payload(char* char_packet, string packet, vector<client_info> client_vector, int sockfd, sockaddr *pcliaddr, socklen_t len, droppc_settings droppc_settings){
 
     vector<client_info> client_vector_copy = client_vector;
     int found_match = 0;
@@ -358,6 +365,14 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             //get sequence number and number of bytes in the packet
             sscanf(char_packet, "%*s %*s %d %*s %d", &packet_num, &bytes_in_payload);
 
+            //if droppc % passes, and mode == packet, drop packet
+            if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 1){
+                //cout << "if droppc " << droppc_settings.droppc_decimal << " is less than or equal to random num " << droppc_settings.rand_number << ", drop packet\n";
+                cout << "dropping packet seq num: " << packet_num << "\n";
+                //dont process packet, just return
+                return client_vector_copy;
+            }
+
             // cout << "packet seq num (from client): " << packet_num << " server-tracked seq num: " << client->sequence_num << "\n";
 
             //if sequence number sent in payload is greater than server-tracked sequence number
@@ -379,7 +394,6 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
                 }
                 if(start_reading_flag == 1){
                     payload[j] = char_packet[i];
-                    // fputc(echoed_packet[i], outFile);
                     if(j == bytes_in_payload){
                         break;
                     }
@@ -394,9 +408,16 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             //if we actually wrote something to the file
             if(bytes_written_to_file == bytes_in_payload){
                 client->bytes_written_to_file += bytes_written_to_file;
-                cout << "bytes written to file from this payload: " << bytes_written_to_file << " bytes in payload: " << bytes_in_payload << "\n";
+                // cout << "bytes written to file from this payload: " << bytes_written_to_file << " bytes in payload: " << bytes_in_payload << "\n";
 
-                send_ack(client, packet_num, sockfd, pcliaddr, len);
+                //if droppc % passes and mode == ack, drop ack
+                if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 2){
+                    cout << "dropping ACK seq num: " << packet_num << "\n";
+                    //dont send ack here, should skip it
+                }else{
+                    //send the ack
+                    send_ack(client, packet_num, sockfd, pcliaddr, len);
+                }
 
                 //increment payload packets written to file
                 client->sequence_num = client->sequence_num + 1;
@@ -404,7 +425,6 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             }else{ //if we didnt write the entire payload of packet to the file, then the client needs to resend it. Just drop the packet. 
                 cout << "problem occured writing packet payload to file, dropping packet\n";
             }
-
 
             bzero(&payload, sizeof(payload));
 
@@ -423,7 +443,33 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
     char mesg[BUFFERLENGTH];
     vector<client_info> client_vector;
 
+    struct droppc_settings droppc_settings;
+    droppc_settings.droppc_decimal = 0;
+    droppc_settings.droppc_mode = 0;
+    droppc_settings.rand_number = 0;
+
+    //3 modes for droppc_mode: 0 is off, 1 is drop packet, 2 is drop ack
+    if(droppc == 0){
+        droppc_settings.droppc_mode = 0;
+    }else{
+        //initialize as dropping a packet
+        droppc_settings.droppc_mode = 1;
+    }
+
+    droppc_settings.droppc_decimal = (float)((float)droppc / (float)100);
+
+    cout << "droppc_decimal: " << droppc_settings.droppc_decimal << "\n";
+
     for(;;){
+
+        //generate random float from 0-1
+        droppc_settings.rand_number = (float) rand()/RAND_MAX;
+        //set droppc_mode for this time around
+        if(droppc_settings.droppc_mode == 1){
+            droppc_settings.droppc_mode = 2;
+        }else if(droppc_settings.droppc_mode == 2){
+            droppc_settings.droppc_mode = 1;
+        }
 
         //get a packet
         len = clilen;
@@ -439,7 +485,7 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
         client_vector = parse_packet_for_ender(mesg, client_vector, sockfd, pcliaddr, len);
         
         //Look for payload packet: if found, write payload to appropriate file and send ack to client
-        client_vector = parse_packet_for_payload(mesg, mesg, client_vector, sockfd, pcliaddr, len);
+        client_vector = parse_packet_for_payload(mesg, mesg, client_vector, sockfd, pcliaddr, len, droppc_settings);
 
         // cout << mesg; 
         bzero(&mesg, sizeof(mesg));
