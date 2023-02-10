@@ -273,6 +273,7 @@ vector<client_info> parse_packet_for_ender(string packet, vector<client_info> cl
                         cout << "Out file size: " << (long long) sb.st_size << " bytes\n";
                     }
                     client_vector_copy.erase(client); //erase entry in client vector
+                    cout << "Erasing client now... New size of client vector: " << client_vector_copy.size() << "\n";
                     break;
                 }
 		        
@@ -365,6 +366,8 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             //get sequence number and number of bytes in the packet
             sscanf(char_packet, "%*s %*s %d %*s %d", &packet_num, &bytes_in_payload);
 
+            cout << "recieved packet: " << packet_num << "\n";
+
             //if droppc % passes, and mode == packet, drop packet
             if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 1){
                 //cout << "if droppc " << droppc_settings.droppc_decimal << " is less than or equal to random num " << droppc_settings.rand_number << ", drop packet\n";
@@ -383,6 +386,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             }else if(packet_num < client->sequence_num){ //if we already have this packet stored, send an ack for it, just in case an ack was dropped
                 cout << "we already have this packet, ack must've been dropped or its a duplicate. Resending ack now.\n";
                 send_ack(client, packet_num, sockfd, pcliaddr, len);
+                return client_vector_copy;
             }
 
             //else, write to file and increment tracked sequence number
@@ -495,6 +499,9 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
 
 
 int main(int argc, char** argv){
+
+    //initialize random seed using time
+    srand(time(NULL));
 
     server_info info = get_port_and_droppc(argc, argv);
     // print_info(info);

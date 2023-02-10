@@ -12,10 +12,11 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
-#include<list>
-#include<signal.h>
+#include <list>
+#include <signal.h>
+#include <sys/time.h>
 using namespace std;
-
+#define INTERVAL 500
 
 //go back n pointers
 int basesn = 0;
@@ -257,6 +258,13 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 1);
     //TODO: wait for ack and retransmit if needed
 
+    //init timer
+    struct itimerval it_val;
+    it_val.it_value.tv_sec = INTERVAL/1000;
+    it_val.it_value.tv_usec = (INTERVAL*1000) % 1000000;   
+    it_val.it_interval = it_val.it_value;
+
+
     int s;
     int n;
     int ack_n;
@@ -325,12 +333,11 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                     window.push_back(new_packet);
                 }
 
-                //set in case of timeout
-                basesn_seq_num = window.front().seq_num;
-
                 if(initial_timer == 0){
                     // cout << "start inital timer\n";
-                    alarm(3);
+                    if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
+                        error_and_exit("error calling setitimer()");
+                    }
                     initial_timer = 1;
                 }
 
@@ -341,28 +348,37 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 
         //handle a timeout
         if(timeout){
+        
             //check for if packet at basesn has been here before
             if(basesn_seq_num == window.front().seq_num){
                 basesn_packet_resent_number++;
             }else{
                 basesn_packet_resent_number = 0;
             }
-            if(basesn_packet_resent_number == 4){
+
+            if(basesn_packet_resent_number == 5){
                 error_and_exit("Resent same packet too many times, exiting now");
             }
             cout << "packet at basesn should be: " << window.front().seq_num << "\n";
             //re-send packets in window 
             cout << "resending packets currently in window\n";
             for (auto const &i: window) {
-                cout << "resending packet: " << i.seq_num << ", bytes in packet: " << i.bytes_in_packet << "\n";
-                s = sendto(sockfd, i.packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
-                if(s < 0){
-                    error_and_exit("sendto() failed.");
+                //only resend if we havent already gotten an ack for this one yet
+                if(i.seq_num >= basesn){
+                    cout << "resending packet: " << i.seq_num << ", bytes in packet: " << i.bytes_in_packet << "\n";
+                    s = sendto(sockfd, i.packet.c_str(), i.bytes_in_packet, 0, pservaddr, servlen);
+                    if(s < 0){
+                        error_and_exit("sendto() failed.");
+                    }
                 }
             }
 
+            basesn_seq_num = window.front().seq_num;
+
             //reset timer
-            alarm(3);
+            if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
+                error_and_exit("error calling setitimer()");
+            }
             timeout = 0;
         }
 
@@ -378,15 +394,23 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
             }
 
+            //when we get ack we need to slide window
             basesn = ack_seq_num + 1;
 
             if(basesn == nextsn){
                 //stopping timer
                 cout << "stopping timer\n";
-                alarm(0);
+                it_val.it_value.tv_sec = 0;
+                it_val.it_value.tv_usec = 0;   
+                it_val.it_interval = it_val.it_value;
+                if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
+                    error_and_exit("error calling setitimer()");
+                }
             }else{
                 // cout << "start timer\n";
-                alarm(3);
+                if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
+                    error_and_exit("error calling setitimer()");
+                }
             }
         }
         
