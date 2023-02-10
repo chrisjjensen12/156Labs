@@ -23,7 +23,7 @@ int nextsn = 0;
 int timeout = 0;
 
 int last_ack = 0;
-int overhead_len = 40;
+int overhead_len = 60;
 int bytes_read_from_in_file = 0;
 int in_file_size = 0;
 
@@ -232,10 +232,20 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
 
 }
 
+string construct_packet(){
+
+    string packet;
+
+
+
+
+    return packet;
+}
+
 void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, socklen_t servlen, int mtu, int winsz, string out_file_path){
 
     if(overhead_len >= mtu){ //check mtu can at least send one byte with overhead
-        error_and_exit("Required minimum MTU is 41");
+        error_and_exit("Required minimum MTU is 61");
     }else if(mtu >= 32000){ //check that the mtu is less than 32000
         error_and_exit("MTU must be less than 32000");
     }
@@ -264,7 +274,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 
     //while the last ack has not been received from server, keep sending packets and looking for acks
     while (last_ack != 1) {
-
+        
         if(nextsn < basesn+winsz && !timeout){
             //construct new packet and send off
             n = read(in_fd, data, mtu-overhead_len); //splits file into mtu-overhead sized chunks
@@ -281,7 +291,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 
             if(n != 0){
                 //prepare packet by adding overhead and data payload
-                bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nPayload:\n", packet_num);
+                bytes_in_packet = sprintf(first_part, "\r\n\r\nPacket Num: %d\r\n\r\nLen: %d\r\n\r\nPayload:\n", packet_num, n);
                 bytes_in_packet += n; //add bytes from data portion
                 packet = first_part;
                 packet.append(data, n);
@@ -289,7 +299,8 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 // cout << packet;
 
                 // send packet to server
-                cout << "sending packet: " << packet_num << "\n";
+                cout << "sending packet: " << packet_num << " num bytes in payload: " << n << "\n";
+
                 s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
                 if(s < 0){
                     error_and_exit("sendto() failed.");
@@ -306,12 +317,13 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 }
 
                 if(initial_timer == 0){
+                    // cout << "start inital timer\n";
                     alarm(3);
+                    initial_timer = 1;
                 }
 
                 packet_num++;
             }
-
 
         }
 
@@ -323,14 +335,18 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
             sscanf(ack_buffer, "%*s %d %*s %d", &ack_seq_num, &last_ack);
             cout << "Got ack for seq num: " << ack_seq_num << " last ack: " << last_ack << "\n";
             if(last_ack == 1){
+                //sends ender packet
                 send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
             }
 
             basesn = ack_seq_num + 1;
 
             if(basesn == nextsn){
+                //stopping timer
+                cout << "stopping timer\n";
                 alarm(0);
             }else{
+                // cout << "start timer\n";
                 alarm(4);
             }
         }
