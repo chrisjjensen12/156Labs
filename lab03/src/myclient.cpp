@@ -15,6 +15,9 @@
 #include <list>
 #include <signal.h>
 #include <sys/time.h>
+#include <iterator>
+#include <locale>
+#include <ctime>
 using namespace std;
 #define INTERVAL 500
 
@@ -23,7 +26,8 @@ int basesn = 0;
 int nextsn = 0;
 int timeout = 0;
 int basesn_packet_resent_number = 0;
-int basesn_seq_num = 0;
+int old_seq_num = 0;
+int new_seq_num = 0;
 
 int last_ack = 0;
 int overhead_len = 60;
@@ -53,8 +57,6 @@ struct socket_info {
 //########################### Helper Functions/Information Gathering ###########################
 
 void sig_handler(int signum){
- 
-  printf("Triggered timeout!\n");
 
   timeout = 1;
 
@@ -228,7 +230,7 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
     if(n < 0){
         if(errno == EINTR){
             //interrupted call
-            error_and_exit("Something interrupted the call to sendto()");
+            error_and_exit("Something interrupted the call to recvfrom()");
         }else if(errno == EAGAIN){
             //server timed out
             error_and_exit("Cannot detect server");
@@ -274,6 +276,11 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     char first_part[overhead_len+1];
     int bytes_in_packet = 0;
     int initial_timer = 0;
+    int first_time = 0;
+
+    //time variables
+    std::time_t time = std::time({});
+    char timeString[std::size("yyyy-mm-ddThh:mm:ssZ")];
 
     bzero(&first_part, sizeof(first_part));
     bzero(&data, sizeof(data));
@@ -286,7 +293,8 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     //while the last ack has not been received from server, keep sending packets and looking for acks
     while (last_ack != 1) {
         
-        if(nextsn < basesn+winsz && !timeout){
+        if((nextsn < basesn+winsz && !timeout)){
+
             //construct new packet and send off
             n = read(in_fd, data, mtu-overhead_len); //splits file into mtu-overhead sized chunks
             bytes_read_from_in_file += n;
@@ -309,29 +317,35 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 packet = first_part;
                 packet.append(data, n);
 
-                // cout << packet;
-
-                // send packet to server
-                cout << "sending packet: " << packet_num << " num bytes in payload: " << n << "\n";
-
-                s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
-                if(s < 0){
-                    error_and_exit("sendto() failed.");
-                }
-                //increment nextsn
-                nextsn++;
-
+                //add packet to window
                 new_packet.bytes_in_packet = bytes_in_packet;
                 new_packet.packet = packet;
                 new_packet.seq_num = packet_num;
 
                 //if vector is full, pop off the front and add new packet
                 if((int)window.size() == winsz){
+                    // cout << "popping " << window.front().seq_num << " from window, and adding " << new_packet.seq_num << "\n";
                     window.pop_front();
                     window.push_back(new_packet);
                 }else{
                     window.push_back(new_packet);
                 }
+
+                // send packet to server
+                // cout << "sending packet: " << packet_num << " num bytes in payload: " << n << "\n";
+
+                s = sendto(sockfd, packet.c_str(), bytes_in_packet, 0, pservaddr, servlen);
+                if(s < 0){
+                    error_and_exit("sendto() failed.");
+                }
+
+                //log to stdout
+                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                std::cout << timeString << ", DATA, " << packet_num << ", " << basesn << ", " << nextsn << "\n";
+
+
+                //increment nextsn
+                nextsn++;
 
                 if(initial_timer == 0){
                     // cout << "start inital timer\n";
@@ -348,32 +362,35 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 
         //handle a timeout
         if(timeout){
-        
-            //check for if packet at basesn has been here before
-            if(basesn_seq_num == window.front().seq_num){
-                basesn_packet_resent_number++;
-            }else{
-                basesn_packet_resent_number = 0;
-            }
-
-            if(basesn_packet_resent_number == 5){
-                error_and_exit("Resent same packet too many times, exiting now");
-            }
-            cout << "packet at basesn should be: " << window.front().seq_num << "\n";
+            first_time = 1;
             //re-send packets in window 
-            cout << "resending packets currently in window\n";
             for (auto const &i: window) {
                 //only resend if we havent already gotten an ack for this one yet
                 if(i.seq_num >= basesn){
-                    cout << "resending packet: " << i.seq_num << ", bytes in packet: " << i.bytes_in_packet << "\n";
+                    if(first_time == 1){
+                        cerr << "Packet loss detected\n";
+                        new_seq_num = i.seq_num;
+                        if(new_seq_num == old_seq_num){
+                            basesn_packet_resent_number++;
+                        }
+                        //if we resent the same packet too many times
+                        if(basesn_packet_resent_number == 5){
+                            error_and_exit("Reached max re-transmission limit\n");
+                        }
+                        first_time = 0;
+                    }
+                    // cout << "resending packet: " << i.seq_num << ", bytes in packet: " << i.bytes_in_packet << "\n";
                     s = sendto(sockfd, i.packet.c_str(), i.bytes_in_packet, 0, pservaddr, servlen);
                     if(s < 0){
                         error_and_exit("sendto() failed.");
                     }
+                    //log to stdout
+                    std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                    std::cout << timeString << ", DATA, " << i.seq_num << ", " << basesn << ", " << nextsn << "\n";
                 }
             }
 
-            basesn_seq_num = window.front().seq_num;
+            old_seq_num = new_seq_num;
 
             //reset timer
             if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
@@ -388,7 +405,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
         //got a packet
         if(ack_n != -1){
             sscanf(ack_buffer, "%*s %d %*s %d", &ack_seq_num, &last_ack);
-            cout << "Got ack for seq num: " << ack_seq_num << " last ack: " << last_ack << "\n";
+            // cout << "Got ack for seq num: " << ack_seq_num << " last ack: " << last_ack << "\n";
             if(last_ack == 1){
                 //sends ender packet
                 send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
@@ -397,9 +414,13 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
             //when we get ack we need to slide window
             basesn = ack_seq_num + 1;
 
-            if(basesn == nextsn){
+            //log to stdout
+            std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+            std::cout << timeString << ", ACK, " << ack_seq_num << ", " << basesn << ", " << nextsn << "\n";
+
+            if(basesn == nextsn && last_ack == 1){
                 //stopping timer
-                cout << "stopping timer\n";
+                cout << "stopping timer. basesn: " << basesn << " nextsn: " << nextsn << " ack_seq_num: " << ack_seq_num << "\n";
                 it_val.it_value.tv_sec = 0;
                 it_val.it_value.tv_usec = 0;   
                 it_val.it_interval = it_val.it_value;

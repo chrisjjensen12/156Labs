@@ -12,6 +12,9 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <iterator>
+#include <locale>
+#include <ctime>
 using namespace std;
 #define BUFFERLENGTH 32000 //max mtu for client
 
@@ -302,6 +305,10 @@ vector<client_info> parse_packet_for_ender(string packet, vector<client_info> cl
 
 void send_ack(vector<client_info>::iterator client, int packet_num, int sockfd, sockaddr *pcliaddr, socklen_t len){
 
+    //time variables
+    std::time_t time = std::time({});
+    char timeString[std::size("yyyy-mm-ddThh:mm:ssZ")];
+
     //construct ack to send, if its the last packet we needed, send a 1 to let the client know it can stop
     string mesg = "ACK_SEQ_NUM: ";
     if(client->bytes_written_to_file == client->num_bytes_in_file){ //check if total number of bytes in file equals what we have now for the size of the packet
@@ -319,13 +326,17 @@ void send_ack(vector<client_info>::iterator client, int packet_num, int sockfd, 
 
     int s;
 
-    cout << "sending ACK seq num: " << packet_num << "\n";
+    // cout << "sending ACK seq num: " << packet_num << "\n";
     //send ack back to client
     s = sendto(sockfd, mesg.c_str(), mesg.length(), 0, pcliaddr, len); 
     if(s < 0){
         cerr << "sendto() failed.\n Exiting now.\n";
         exit(EXIT_FAILURE);
     } 
+
+    //log to stdout
+    std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+    std::cout << timeString << ", ACK, " << packet_num << "\n";
 
     return;
 }
@@ -340,6 +351,10 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 
         //if we found a payload packet
         if(found == 4){
+
+            //time variables
+            std::time_t time = std::time({});
+            char timeString[std::size("yyyy-mm-ddThh:mm:ssZ")];
 
             vector<client_info>::iterator client;
 
@@ -366,12 +381,18 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             //get sequence number and number of bytes in the packet
             sscanf(char_packet, "%*s %*s %d %*s %d", &packet_num, &bytes_in_payload);
 
-            cout << "recieved packet: " << packet_num << "\n";
+            // cout << "recieved packet: " << packet_num << "\n";
+
+            //log to stdout
+            std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+            std::cout << timeString << ", DATA, " << packet_num << "\n";
 
             //if droppc % passes, and mode == packet, drop packet
             if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 1){
                 //cout << "if droppc " << droppc_settings.droppc_decimal << " is less than or equal to random num " << droppc_settings.rand_number << ", drop packet\n";
-                cout << "dropping packet seq num: " << packet_num << "\n";
+                // cout << "dropping packet seq num: " << packet_num << "\n";
+                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
                 //dont process packet, just return
                 return client_vector_copy;
             }
@@ -381,10 +402,12 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             //if sequence number sent in payload is greater than server-tracked sequence number
             if(packet_num > client->sequence_num){
                 //drop packet, client needs to resend. Just return back to main loop and dont process packet
-                cout << "out of order packet detected: " << packet_num << "\n";
+                // cout << "out of order packet detected: " << packet_num << "\n";
+                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
                 return client_vector_copy;
-            }else if(packet_num < client->sequence_num){ //if we already have this packet stored, send an ack for it, just in case an ack was dropped
-                cout << "we already have this packet, ack must've been dropped or its a duplicate. Resending ack now.\n";
+            }else if(packet_num < client->sequence_num && droppc_settings.droppc_decimal != 1){ //if we already have this packet stored, send an ack for it, just in case an ack was dropped
+                // cout << "we already have this packet, ack must've been dropped or its a duplicate. Resending ack now.\n";
                 send_ack(client, packet_num, sockfd, pcliaddr, len);
                 return client_vector_copy;
             }
@@ -416,7 +439,9 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 
                 //if droppc % passes and mode == ack, drop ack
                 if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 2){
-                    cout << "dropping ACK seq num: " << packet_num << "\n";
+                    // cout << "dropping ACK seq num: " << packet_num << "\n";
+                    std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                    std::cout << timeString << ", DROP ACK, " << packet_num << "\n";
                     //dont send ack here, should skip it
                 }else{
                     //send the ack
@@ -428,6 +453,8 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 
             }else{ //if we didnt write the entire payload of packet to the file, then the client needs to resend it. Just drop the packet. 
                 cout << "problem occured writing packet payload to file, dropping packet\n";
+                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
             }
 
             bzero(&payload, sizeof(payload));
