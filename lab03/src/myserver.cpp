@@ -273,6 +273,7 @@ vector<client_info> parse_packet_for_ender(string packet, vector<client_info> cl
                         error_and_exit("stat() error");
                     }
                     else { //success finding size of file
+                        cout << "In file size: " << client->num_bytes_in_file << " bytes\n";
                         cout << "Out file size: " << (long long) sb.st_size << " bytes\n";
                     }
                     client_vector_copy.erase(client); //erase entry in client vector

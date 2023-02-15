@@ -19,7 +19,7 @@
 #include <locale>
 #include <ctime>
 using namespace std;
-#define INTERVAL 500
+#define INTERVAL 200
 
 //go back n pointers
 int basesn = 0;
@@ -58,7 +58,7 @@ struct socket_info {
 
 void sig_handler(int signum){
 
-  timeout = 1;
+  cout << "bruh\n";
 
   return;
 }
@@ -195,7 +195,7 @@ int check_and_open_in_file(server_info info){
 
 //########################### Client Processing ###########################
 
-void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path, int ender_or_header){
+int send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path, int ender_or_header){
 
     int n = 0;
     int s = 0;
@@ -223,6 +223,7 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
     if(s < 0){
         error_and_exit("sendto() failed.");
     }
+
     n = recvfrom(sockfd, ackbuffer, 5000, 0, NULL, NULL);
 
     cout << ackbuffer << "\n";
@@ -230,7 +231,7 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
     if(n < 0){
         if(errno == EINTR){
             //interrupted call
-            error_and_exit("Something interrupted the call to recvfrom()");
+            return 0;
         }else if(errno == EAGAIN){
             //server timed out
             error_and_exit("Cannot detect server");
@@ -243,8 +244,47 @@ void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t
         }
     }
 
-    return;
+    return 1;
 
+}
+
+void handle_timeout(list<packet_info> window, int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path){
+
+    int closed_server = 0;
+    cerr << "Packet loss detected\n";
+
+    new_seq_num = window.front().seq_num;
+
+    if(new_seq_num == old_seq_num){
+        basesn_packet_resent_number++;
+        if(basesn_packet_resent_number == 5){
+            while(closed_server == 0){
+                //let server know we failed
+                closed_server = send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+            }
+            error_and_exit("Reached max re-transmission limit");
+        }
+    }else{
+        basesn_packet_resent_number = 0;
+    }
+
+    int s;
+    std::time_t time = std::time({});
+    char timeString[std::size("yyyy-mm-ddThh:mm:ssZ")];
+    // cout << "re-sending packets in window. Basesn should be: " << basesn << " basesn IS: " << window.front().seq_num << " nextsn: " << nextsn << " window size: " << window.size() << "\n";
+    for (auto const &i: window) {
+        // cout << "packet seq: " << i.seq_num << "\n";
+        std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+        std::cout << timeString << ", DATA, " << i.seq_num << ", " << basesn << ", " << nextsn << "\n";
+        s = sendto(sockfd, i.packet.c_str(), i.bytes_in_packet, 0, pservaddr, servlen);
+        if(s < 0){
+            error_and_exit("sendto() failed.");
+        }
+    }
+
+    old_seq_num = new_seq_num;
+
+    return;
 }
 
 
@@ -265,7 +305,9 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     it_val.it_value.tv_sec = INTERVAL/1000;
     it_val.it_value.tv_usec = (INTERVAL*1000) % 1000000;   
     it_val.it_interval = it_val.it_value;
-
+    struct timeval tv1;
+    tv1.tv_sec = 0; //60s timeout
+    tv1.tv_usec = 300;
 
     int s;
     int n;
@@ -275,8 +317,9 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     int packet_num = 0;
     char first_part[overhead_len+1];
     int bytes_in_packet = 0;
-    int initial_timer = 0;
-    int first_time = 0;
+    int done_reading = 0;
+    int old_basesn = 0;
+    int closed_server = 0;
 
     //time variables
     std::time_t time = std::time({});
@@ -293,7 +336,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     //while the last ack has not been received from server, keep sending packets and looking for acks
     while (last_ack != 1) {
         
-        if((nextsn < basesn+winsz && !timeout)){
+        while((nextsn < basesn+winsz) && done_reading == 0){
 
             //construct new packet and send off
             n = read(in_fd, data, mtu-overhead_len); //splits file into mtu-overhead sized chunks
@@ -305,7 +348,8 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 //send ender packet
                 // send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
                 //TODO: wait for ack and retransmit if needed
-                // break;
+                done_reading = 1;
+                break;
             }
 
             if(n != 0){
@@ -322,14 +366,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 new_packet.packet = packet;
                 new_packet.seq_num = packet_num;
 
-                //if vector is full, pop off the front and add new packet
-                if((int)window.size() == winsz){
-                    // cout << "popping " << window.front().seq_num << " from window, and adding " << new_packet.seq_num << "\n";
-                    window.pop_front();
-                    window.push_back(new_packet);
-                }else{
-                    window.push_back(new_packet);
-                }
+                window.push_back(new_packet);
 
                 // send packet to server
                 // cout << "sending packet: " << packet_num << " num bytes in payload: " << n << "\n";
@@ -339,68 +376,22 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                     error_and_exit("sendto() failed.");
                 }
 
-                //log to stdout
-                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-                std::cout << timeString << ", DATA, " << packet_num << ", " << basesn << ", " << nextsn << "\n";
-
-
                 //increment nextsn
                 nextsn++;
 
-                if(initial_timer == 0){
-                    // cout << "start inital timer\n";
-                    if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
-                        error_and_exit("error calling setitimer()");
-                    }
-                    initial_timer = 1;
-                }
+                 //log to stdout
+                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
+                std::cout << timeString << ", DATA, " << packet_num << ", " << basesn << ", " << nextsn << "\n";
 
                 packet_num++;
             }
 
         }
 
-        //handle a timeout
-        if(timeout){
-            first_time = 1;
-            //re-send packets in window 
-            for (auto const &i: window) {
-                //only resend if we havent already gotten an ack for this one yet
-                if(i.seq_num >= basesn){
-                    if(first_time == 1){
-                        cerr << "Packet loss detected\n";
-                        new_seq_num = i.seq_num;
-                        if(new_seq_num == old_seq_num){
-                            basesn_packet_resent_number++;
-                        }
-                        //if we resent the same packet too many times
-                        if(basesn_packet_resent_number == 5){
-                            error_and_exit("Reached max re-transmission limit\n");
-                        }
-                        first_time = 0;
-                    }
-                    // cout << "resending packet: " << i.seq_num << ", bytes in packet: " << i.bytes_in_packet << "\n";
-                    s = sendto(sockfd, i.packet.c_str(), i.bytes_in_packet, 0, pservaddr, servlen);
-                    if(s < 0){
-                        error_and_exit("sendto() failed.");
-                    }
-                    //log to stdout
-                    std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-                    std::cout << timeString << ", DATA, " << i.seq_num << ", " << basesn << ", " << nextsn << "\n";
-                }
-            }
-
-            old_seq_num = new_seq_num;
-
-            //reset timer
-            if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
-                error_and_exit("error calling setitimer()");
-            }
-            timeout = 0;
-        }
 
         //call a nonblocking recvfrom to get any available acks from server
-        ack_n = recvfrom(sockfd, ack_buffer, 2048, MSG_DONTWAIT, NULL, NULL);
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv1, sizeof(tv1)); //set timeout 
+        ack_n = recvfrom(sockfd, ack_buffer, 2048, 0, NULL, NULL);
 
         //got a packet
         if(ack_n != -1){
@@ -408,30 +399,45 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
             // cout << "Got ack for seq num: " << ack_seq_num << " last ack: " << last_ack << "\n";
             if(last_ack == 1){
                 //sends ender packet
-                send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+                
+                while(closed_server == 0){
+                    //let server know we're done
+                    closed_server = send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+                }
+                break;
             }
 
+            old_basesn = basesn;
+            
             //when we get ack we need to slide window
-            basesn = ack_seq_num + 1;
+            if(ack_seq_num >= basesn){
+                basesn = ack_seq_num + 1;
+            }
+
+            //pop entries from window
+            for(int i = 0; i < basesn-old_basesn; i++){
+                window.pop_front();
+            }
 
             //log to stdout
             std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
             std::cout << timeString << ", ACK, " << ack_seq_num << ", " << basesn << ", " << nextsn << "\n";
 
-            if(basesn == nextsn && last_ack == 1){
-                //stopping timer
-                cout << "stopping timer. basesn: " << basesn << " nextsn: " << nextsn << " ack_seq_num: " << ack_seq_num << "\n";
-                it_val.it_value.tv_sec = 0;
-                it_val.it_value.tv_usec = 0;   
-                it_val.it_interval = it_val.it_value;
-                if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
-                    error_and_exit("error calling setitimer()");
-                }
+        }
+
+        if(ack_n < 0){
+            if(errno == EINTR){
+                //interrupted call
+                cout << "interrupted call\n";
+            }else if(errno == EAGAIN){
+                //server timed out
+                handle_timeout(window, sockfd, pservaddr, servlen, out_file_path);
+            }else if(errno == EWOULDBLOCK){
+                //server timed out
+                handle_timeout(window, sockfd, pservaddr, servlen, out_file_path);
             }else{
-                // cout << "start timer\n";
-                if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
-                    error_and_exit("error calling setitimer()");
-                }
+                //other recvfrom error
+                cout << "recvfrom() failed\n";
             }
         }
         
@@ -442,6 +448,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
         bzero(&data, sizeof(data)); //zero out data for next read
     }
 
+    close(in_fd);
 
 }
 
