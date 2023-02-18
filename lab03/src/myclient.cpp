@@ -56,13 +56,6 @@ struct socket_info {
 
 //########################### Helper Functions/Information Gathering ###########################
 
-void sig_handler(int signum){
-
-  cout << "bruh\n";
-
-  return;
-}
-
 void error_and_exit(string print_error){
 
     int errnum;
@@ -195,7 +188,34 @@ int check_and_open_in_file(server_info info){
 
 //########################### Client Processing ###########################
 
-int send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path, int ender_or_header){
+int end_transmission(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path){
+
+    int s = 0;
+    char ackbuffer[5000];
+    bzero(&ackbuffer, sizeof(ackbuffer));
+    string packet;
+    packet = "ENDER_PACKET\r\n\r\nout_file_path: ";
+    packet.append(out_file_path);
+
+    s = sendto(sockfd, packet.c_str(), 5000, 0, pservaddr, servlen);
+    if(s < 0){
+        error_and_exit("sendto() failed.");
+    }
+
+    recvfrom(sockfd, ackbuffer, 5000, 0, NULL, NULL);
+
+    std::size_t found = string(ackbuffer).find("ENDER ACK");
+    if (found==std::string::npos){
+        return 0;
+    }else{
+        return 1;
+    }
+
+    return 1;
+
+}
+
+void send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t servlen, string out_file_path){
 
     int n = 0;
     int s = 0;
@@ -205,18 +225,12 @@ int send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t 
     char ackbuffer[5000];
     bzero(&ackbuffer, sizeof(ackbuffer));
     string packet;
-    if(ender_or_header == 1){
-        cout << "sending header packet...\n";
-        packet = "INFORMATION_PACKET_ID\r\n\r\nout_file_path: ";
-        packet.append(out_file_path);
-        packet.append("\r\n\r\nbytes_in_file: ");
-        string in_file_size_str = to_string(in_file_size);
-        packet.append(in_file_size_str);
-    }else{
-        cout << "sending ender packet...\n";
-        packet = "ENDER_PACKET\r\n\r\nout_file_path: ";
-        packet.append(out_file_path);
-    }
+    // cout << "sending header packet...\n";
+    packet = "INFORMATION_PACKET_ID\r\n\r\nout_file_path: ";
+    packet.append(out_file_path);
+    packet.append("\r\n\r\nbytes_in_file: ");
+    string in_file_size_str = to_string(in_file_size);
+    packet.append(in_file_size_str);
     // cout << packet << "\n";
     setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)); //set timeout 
     s = sendto(sockfd, packet.c_str(), 5000, 0, pservaddr, servlen);
@@ -226,12 +240,12 @@ int send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t 
 
     n = recvfrom(sockfd, ackbuffer, 5000, 0, NULL, NULL);
 
-    cout << ackbuffer << "\n";
+    // cout << ackbuffer << "\n";
 
     if(n < 0){
         if(errno == EINTR){
             //interrupted call
-            return 0;
+            return;
         }else if(errno == EAGAIN){
             //server timed out
             error_and_exit("Cannot detect server");
@@ -244,7 +258,7 @@ int send_client_info_to_server(int sockfd, const sockaddr *pservaddr, socklen_t 
         }
     }
 
-    return 1;
+    return;
 
 }
 
@@ -252,6 +266,7 @@ void handle_timeout(list<packet_info> window, int sockfd, const sockaddr *pserva
 
     int closed_server = 0;
     cerr << "Packet loss detected\n";
+    // cout << "basesn: " << basesn << " nextsn: " << nextsn << " basesn_packet_resent_number: " << basesn_packet_resent_number << " window.front().seq_num: " << window.front().seq_num << "\n";
 
     new_seq_num = window.front().seq_num;
 
@@ -260,7 +275,7 @@ void handle_timeout(list<packet_info> window, int sockfd, const sockaddr *pserva
         if(basesn_packet_resent_number == 5){
             while(closed_server == 0){
                 //let server know we failed
-                closed_server = send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+                closed_server = end_transmission(sockfd, pservaddr, servlen, out_file_path);
             }
             error_and_exit("Reached max re-transmission limit");
         }
@@ -297,7 +312,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     }
 
     //send information about the file thats about to be sent, including the out file path that the server needs to make
-    send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 1);
+    send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path);
     //TODO: wait for ack and retransmit if needed
 
     //init timer
@@ -307,7 +322,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
     it_val.it_interval = it_val.it_value;
     struct timeval tv1;
     tv1.tv_sec = 0; //60s timeout
-    tv1.tv_usec = 300;
+    tv1.tv_usec = 80000;
 
     int s;
     int n;
@@ -345,9 +360,6 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 error_and_exit("Read() error");
             }
             if(n == 0){ //eof
-                //send ender packet
-                // send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
-                //TODO: wait for ack and retransmit if needed
                 done_reading = 1;
                 break;
             }
@@ -399,10 +411,10 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
             // cout << "Got ack for seq num: " << ack_seq_num << " last ack: " << last_ack << "\n";
             if(last_ack == 1){
                 //sends ender packet
-                
+                cerr << "Transfer complete\n";
                 while(closed_server == 0){
                     //let server know we're done
-                    closed_server = send_client_info_to_server(sockfd, pservaddr, servlen, out_file_path, 0);
+                    closed_server = end_transmission(sockfd, pservaddr, servlen, out_file_path);
                 }
                 break;
             }
@@ -428,7 +440,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
         if(ack_n < 0){
             if(errno == EINTR){
                 //interrupted call
-                cout << "interrupted call\n";
+                // cout << "interrupted call\n";
             }else if(errno == EAGAIN){
                 //server timed out
                 handle_timeout(window, sockfd, pservaddr, servlen, out_file_path);
@@ -437,7 +449,7 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
                 handle_timeout(window, sockfd, pservaddr, servlen, out_file_path);
             }else{
                 //other recvfrom error
-                cout << "recvfrom() failed\n";
+                cerr << "recvfrom() failed\n";
             }
         }
         
@@ -453,7 +465,6 @@ void do_client_processing(int in_fd, int sockfd, const sockaddr *pservaddr, sock
 }
 
 int main(int argc, char** argv){
-    signal(SIGALRM,sig_handler); // Register signal handler
     server_info info = get_commandline_args(argc, argv);
     // print_info(info);
     socket_info socketinfo = connect_to_socket(info); //returns information about server socket
@@ -461,8 +472,8 @@ int main(int argc, char** argv){
     do_client_processing(in_fd, socketinfo.sockfd, (sockaddr *) &socketinfo.servaddr, sizeof(socketinfo.servaddr), info.mtu, info.winsz, info.out_file_path);
 
     //A few debugging printouts before exiting:
-    cout << "\n\nBytes read from in file: " << bytes_read_from_in_file << "\n";
-    cout << "In file size: " << in_file_size << "\n";
+    // cout << "\n\nBytes read from in file: " << bytes_read_from_in_file << "\n";
+    // cout << "In file size: " << in_file_size << "\n";
 
     close(in_fd); //close in file once we're done with everything
     return 0;

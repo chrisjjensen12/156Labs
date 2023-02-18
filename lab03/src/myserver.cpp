@@ -15,8 +15,12 @@
 #include <iterator>
 #include <locale>
 #include <ctime>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
 using namespace std;
 #define BUFFERLENGTH 32000 //max mtu for client
+
 
 struct droppc_settings{
     float droppc_decimal;
@@ -30,6 +34,8 @@ struct client_info{
     int sequence_num;
     int num_bytes_in_file;
     int bytes_written_to_file;
+    int packets_received;
+    int packets_dropped;
     string out_file_path;
 };
 
@@ -205,11 +211,11 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
     if (found!=std::string::npos){
         //if we found the header packet, make directory, open file, push to vector, and send ack back to client
         if(found == 0){
-            cout << "got header packet\n";
+            // cout << "got header packet\n";
             //get out_file_path from packet
             sscanf(packet.c_str(), "%*s %*s %s %*s %d", out_file_path, &file_size);
 
-            cout << "file_size: " << file_size << "\n";
+            // cout << "file_size: " << file_size << "\n";
             //send to function to make directory
             make_outfile_dir(out_file_path);
 
@@ -223,6 +229,8 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
             new_client.num_bytes_in_file = file_size;
             new_client.bytes_written_to_file = 0;
             new_client.out_file_path = out_file_path;
+            new_client.packets_received = 0;
+            new_client.packets_dropped = 0;
             
 
             //push client info struct to vector and return
@@ -257,34 +265,42 @@ vector<client_info> parse_packet_for_ender(string packet, vector<client_info> cl
     if (found!=std::string::npos){
         //if we encountered the ender packet, close file and send ack
         if(found == 0){
-            cout << "got ender packet, closing file now...\n";
+            // cout << "got ender packet, closing file now...\n";
 
             //loop through client vector
             for(vector<client_info>::const_iterator client=client_vector_copy.begin(); client!=client_vector_copy.end(); client++){
 
                 //if this client is the one we're looking for, close file and erase entry in vector
                 if(client->pcliaddr == pcliaddr){
-                    cout << "found match in vector\n";
+                    // cout << "found match in vector\n";
                     found_match = 1;
                     if(fclose(client->outfile) != 0){
-                        cout << "error closing outfile\n";
+                        cerr << "error closing outfile\n";
                     }
                     if (stat(client->out_file_path.c_str(), &sb) == -1) {
                         error_and_exit("stat() error");
                     }
                     else { //success finding size of file
-                        cout << "In file size: " << client->num_bytes_in_file << " bytes\n";
-                        cout << "Out file size: " << (long long) sb.st_size << " bytes\n";
+                        // cerr << "In file size: " << client->num_bytes_in_file << " bytes\n";
+                        // cerr << "Out file size: " << (long long) sb.st_size << " bytes\n";
+
+                        if(client->num_bytes_in_file == (long long) sb.st_size){
+                            cerr << "File transfer complete\n";
+                        }else{
+                            cerr << "File incomplete\n";
+                        }
                     }
                     client_vector_copy.erase(client); //erase entry in client vector
-                    cout << "Erasing client now... New size of client vector: " << client_vector_copy.size() << "\n";
+                    cerr << "Client terminated, erasing client from vector\n";
+                    // cout << "Erasing client now... New size of client vector: " << client_vector_copy.size() << "\n";
+                    // cout << "Percent packets dropped: " << ((float)client->packets_dropped/(float)client->packets_received)*100*1.8 << "%\n";
                     break;
                 }
 		        
 	        }
 
             if(found_match == 0){
-                cout << "No match in vector\n";
+                // cout << "No match in vector\n";
                 return client_vector_copy;
             }
 
@@ -369,7 +385,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 	        }
 
             if(found_match == 0){
-                cout << "could not find a match in vector for parse payload function\n";
+                // cout << "could not find a match in vector for parse payload function\n";
                 return client_vector_copy;
             }
 
@@ -383,6 +399,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             sscanf(char_packet, "%*s %*s %d %*s %d", &packet_num, &bytes_in_payload);
 
             // cout << "recieved packet: " << packet_num << "\n";
+            client->packets_received++;
 
             //log to stdout
             std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
@@ -394,6 +411,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
                 // cout << "dropping packet seq num: " << packet_num << "\n";
                 std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
                 std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
+                client->packets_dropped++;
                 //dont process packet, just return
                 return client_vector_copy;
             }
@@ -443,6 +461,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
                     // cout << "dropping ACK seq num: " << packet_num << "\n";
                     std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
                     std::cout << timeString << ", DROP ACK, " << packet_num << "\n";
+                    client->packets_dropped++;
                     //dont send ack here, should skip it
                 }else{
                     //send the ack
@@ -453,7 +472,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
                 client->sequence_num = client->sequence_num + 1;
 
             }else{ //if we didnt write the entire payload of packet to the file, then the client needs to resend it. Just drop the packet. 
-                cout << "problem occured writing packet payload to file, dropping packet\n";
+                // cout << "problem occured writing packet payload to file, dropping packet\n";
                 std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
                 std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
             }
@@ -490,7 +509,7 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
 
     droppc_settings.droppc_decimal = (float)((float)droppc / (float)100);
 
-    cout << "droppc_decimal: " << droppc_settings.droppc_decimal << "\n";
+    // cout << "droppc_decimal: " << droppc_settings.droppc_decimal << "\n";
 
     for(;;){
 
