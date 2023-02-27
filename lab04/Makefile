@@ -22,7 +22,7 @@ client_compile:
 	$(CC) -c $(CFLAG) $(SRC_LIST1) -o $(OBJ_LIST1)
 
 $(PROG_NAME1): client_compile
-	$(LD) $(OBJ_LIST1) -o $(BIN_DIR)/$@
+	$(LD) -pthread $(OBJ_LIST1) -o $(BIN_DIR)/$@
 
 server_compile: 
 	$(CC) -c $(CFLAG) $(SRC_LIST2) -o $(OBJ_LIST2)

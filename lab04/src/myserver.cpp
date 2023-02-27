@@ -22,6 +22,8 @@ using namespace std;
 #define BUFFERLENGTH 32000 //max mtu for client
 
 
+int local_port = 0;
+
 struct droppc_settings{
     float droppc_decimal;
     float rand_number;
@@ -42,6 +44,8 @@ struct client_info{
     int packets_received;
     int packets_dropped;
     string out_file_path;
+    int remote_port_num;
+    string clientIP;
 };
 
 struct server_info{
@@ -96,6 +100,10 @@ server_info get_port_and_droppc(int argc, char** argv){
     }else{
         error_and_exit("Please use a correct port number. Exiting now.");
     }
+
+    local_port = port_num;
+
+    cout << local_port << "\n";
 
     if(port_num <= 1024){
         error_and_exit("Port number should be greater than 1024, and less than 65536");
@@ -256,9 +264,30 @@ file_info make_dir_and_open_file(string client_out_file_path, string root_folder
 
 }
 
+void log_time(string ack_or_data, string clientIP, int rport, int pktsn){
+
+
+    // Get the current time
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::chrono::microseconds now_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+
+    // Generate RFC 3339 time string
+    char buffer[30];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", std::gmtime(&now_time_t));
+    std::sprintf(buffer + 19, ".%03dZ", (int)(now_microseconds.count() % 1000000) / 1000);
+
+    //print log line
+    std::cout << buffer << ", " << local_port << ", " << clientIP << ", "
+    << rport << ", " << ack_or_data << ", " << pktsn << "\n";
+
+    return;
+}
+
+
 //########################### Server Processing ###########################
 
-vector<client_info> parse_packet_for_info_header(string packet, vector<client_info> client_vector, sockaddr *pcliaddr, int sockfd, socklen_t len, string root_folder_path){
+vector<client_info> parse_packet_for_info_header(string packet, vector<client_info> client_vector, sockaddr *pcliaddr, int sockfd, socklen_t len, string root_folder_path, sockaddr_in cliaddr){
 
     int s;
     vector<client_info> client_vector_copy = client_vector;
@@ -273,7 +302,7 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
     if (found!=std::string::npos){
         //if we found the header packet, make directory, open file, push to vector, and send ack back to client
         if(found == 0){
-            // cout << "got header packet\n";
+            cout << "got header packet\n";
             //get out_file_path from packet
             sscanf(packet.c_str(), "%*s %*s %s %*s %d", out_file_path, &file_size);
 
@@ -291,6 +320,14 @@ vector<client_info> parse_packet_for_info_header(string packet, vector<client_in
             new_client.packets_received = 0;
             new_client.packets_dropped = 0;
             
+            char client_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(cliaddr.sin_addr), client_ip, INET_ADDRSTRLEN);
+            int client_port = ntohs(cliaddr.sin_port);
+
+            new_client.remote_port_num = client_port;
+            new_client.clientIP = client_ip;
+
+            cout << "client port num: " << client_port << "\n";
 
             //push client info struct to vector and return
             client_vector_copy.push_back(new_client);
@@ -381,10 +418,6 @@ vector<client_info> parse_packet_for_ender(string packet, vector<client_info> cl
 
 void send_ack(vector<client_info>::iterator client, int packet_num, int sockfd, sockaddr *pcliaddr, socklen_t len){
 
-    //time variables
-    std::time_t time = std::time({});
-    char timeString[std::size("yyyy-mm-ddThh:mm:ssZ")];
-
     //construct ack to send, if its the last packet we needed, send a 1 to let the client know it can stop
     string mesg = "ACK_SEQ_NUM: ";
     if(client->bytes_written_to_file == client->num_bytes_in_file){ //check if total number of bytes in file equals what we have now for the size of the packet
@@ -411,8 +444,7 @@ void send_ack(vector<client_info>::iterator client, int packet_num, int sockfd, 
     } 
 
     //log to stdout
-    std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-    std::cout << timeString << ", ACK, " << packet_num << "\n";
+    log_time("ACK", client->clientIP, client->remote_port_num, packet_num);
 
     return;
 }
@@ -427,10 +459,6 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 
         //if we found a payload packet
         if(found == 4){
-
-            //time variables
-            std::time_t time = std::time({});
-            char timeString[std::size("yyyy-mm-ddThh:mm:ssZ")];
 
             vector<client_info>::iterator client;
 
@@ -461,15 +489,13 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             client->packets_received++;
 
             //log to stdout
-            std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-            std::cout << timeString << ", DATA, " << packet_num << "\n";
+            log_time("DATA", client->clientIP, client->remote_port_num, packet_num);
 
             //if droppc % passes, and mode == packet, drop packet
             if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 1){
                 //cout << "if droppc " << droppc_settings.droppc_decimal << " is less than or equal to random num " << droppc_settings.rand_number << ", drop packet\n";
                 // cout << "dropping packet seq num: " << packet_num << "\n";
-                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-                std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
+                log_time("DROP DATA", client->clientIP, client->remote_port_num, packet_num);
                 client->packets_dropped++;
                 //dont process packet, just return
                 return client_vector_copy;
@@ -481,8 +507,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
             if(packet_num > client->sequence_num){
                 //drop packet, client needs to resend. Just return back to main loop and dont process packet
                 // cout << "out of order packet detected: " << packet_num << "\n";
-                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-                std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
+                log_time("DROP DATA", client->clientIP, client->remote_port_num, packet_num);
                 return client_vector_copy;
             }else if(packet_num < client->sequence_num && droppc_settings.droppc_decimal != 1){ //if we already have this packet stored, send an ack for it, just in case an ack was dropped
                 // cout << "we already have this packet, ack must've been dropped or its a duplicate. Resending ack now.\n";
@@ -518,8 +543,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
                 //if droppc % passes and mode == ack, drop ack
                 if((droppc_settings.rand_number <= droppc_settings.droppc_decimal) && droppc_settings.droppc_mode == 2){
                     // cout << "dropping ACK seq num: " << packet_num << "\n";
-                    std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-                    std::cout << timeString << ", DROP ACK, " << packet_num << "\n";
+                    log_time("DROP ACK", client->clientIP, client->remote_port_num, packet_num);
                     client->packets_dropped++;
                     //dont send ack here, should skip it
                 }else{
@@ -532,8 +556,7 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 
             }else{ //if we didnt write the entire payload of packet to the file, then the client needs to resend it. Just drop the packet. 
                 // cout << "problem occured writing packet payload to file, dropping packet\n";
-                std::strftime(std::data(timeString), std::size(timeString), "%FT%TZ", std::gmtime(&time));
-                std::cout << timeString << ", DROP DATA, " << packet_num << "\n";
+                log_time("DROP DATA", client->clientIP, client->remote_port_num, packet_num);
             }
 
             bzero(&payload, sizeof(payload));
@@ -546,13 +569,12 @@ vector<client_info> parse_packet_for_payload(char* char_packet, string packet, v
 
 }
 
-void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int droppc, string root_folder_path){
+void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int droppc, string root_folder_path, sockaddr_in cliaddr){
 
     int n;
     socklen_t len;
     char mesg[BUFFERLENGTH];
     vector<client_info> client_vector;
-
     struct droppc_settings droppc_settings;
     droppc_settings.droppc_decimal = 0;
     droppc_settings.droppc_mode = 0;
@@ -583,19 +605,19 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
 
         //get a packet
         len = clilen;
-        n = recvfrom(sockfd, mesg, BUFFERLENGTH, 0, pcliaddr, &len); //reads datagram
+        n = recvfrom(sockfd, mesg, BUFFERLENGTH, 0, (struct sockaddr*)&cliaddr, &len); //reads datagram
         if(n < 0){
             cerr << "recvfrom() failed.\n Exiting now.\n";
             exit(EXIT_FAILURE);
         }
         //Look for header packet: update client info vector if new client sends header packet
-        client_vector = parse_packet_for_info_header(mesg, client_vector, pcliaddr, sockfd, len, root_folder_path);
+        client_vector = parse_packet_for_info_header(mesg, client_vector, (struct sockaddr*)&cliaddr, sockfd, len, root_folder_path, cliaddr);
 
         //Look for ender packet so we know when to close the file pointer and pop that client off of the client_info vector
-        client_vector = parse_packet_for_ender(mesg, client_vector, sockfd, pcliaddr, len);
+        client_vector = parse_packet_for_ender(mesg, client_vector, sockfd, (struct sockaddr*)&cliaddr, len);
         
         //Look for payload packet: if found, write payload to appropriate file and send ack to client
-        client_vector = parse_packet_for_payload(mesg, mesg, client_vector, sockfd, pcliaddr, len, droppc_settings);
+        client_vector = parse_packet_for_payload(mesg, mesg, client_vector, sockfd, (struct sockaddr*)&cliaddr, len, droppc_settings);
 
         // cout << mesg; 
         bzero(&mesg, sizeof(mesg));
@@ -614,6 +636,6 @@ int main(int argc, char** argv){
 
     socket_info sockinfo = connect_to_socket(info);
 
-    do_server_processing(sockinfo.sockfd, (sockaddr *) &sockinfo.cliaddr, sizeof(sockinfo.cliaddr), info.droppc, info.root_folder_path);
+    do_server_processing(sockinfo.sockfd, (sockaddr *) &sockinfo.cliaddr, sizeof(sockinfo.cliaddr), info.droppc, info.root_folder_path, sockinfo.cliaddr);
 
 }
