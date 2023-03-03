@@ -103,7 +103,7 @@ server_info get_port_and_droppc(int argc, char** argv){
 
     local_port = port_num;
 
-    cout << local_port << "\n";
+    // cout << local_port << "\n";
 
     if(port_num <= 1024){
         error_and_exit("Port number should be greater than 1024, and less than 65536");
@@ -137,7 +137,7 @@ server_info get_port_and_droppc(int argc, char** argv){
             error_and_exit("Unable to create directory at root_folder_path/out_file_path");
         }
     }
-    cout << "created root directory: " << info.root_folder_path << "\n";
+    cerr << "created root directory: " << info.root_folder_path << "\n";
 
     info.port_num = port_num;
     info.droppc = droppc;
@@ -239,7 +239,7 @@ file_info make_dir_and_open_file(string client_out_file_path, string root_folder
         }
     }
 
-    cout << "created new directory in server's root folder: " << final_path << "\n";
+    cerr << "created new directory in server's root folder: " << final_path << "\n";
 
     //construct path WITH the file at the end
     string path_with_file;
@@ -255,7 +255,7 @@ file_info make_dir_and_open_file(string client_out_file_path, string root_folder
         error_and_exit("Error opening file at out_file_path");
     }
 
-    cout << "opening file in the client given directory in the server's root folder: " << path_with_file << "\n";
+    cerr << "opening file in the client given directory in the server's root folder: " << path_with_file << "\n";
 
     file_info.file_path = path_with_file;
     file_info.outFile = outFile;
@@ -361,7 +361,6 @@ vector<client_info> parse_packet_for_ender(string packet, vector<client_info> cl
     if (found!=std::string::npos){
         //if we encountered the ender packet, close file and send ack
         if(found == 0){
-            // cout << "got ender packet, closing file now...\n";
 
             //loop through client vector
             for(vector<client_info>::const_iterator client=client_vector_copy.begin(); client!=client_vector_copy.end(); client++){
@@ -579,6 +578,7 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
     droppc_settings.droppc_decimal = 0;
     droppc_settings.droppc_mode = 0;
     droppc_settings.rand_number = 0;
+    int recv_buffer = BUFFERLENGTH * 30;
 
     //3 modes for droppc_mode: 0 is off, 1 is drop packet, 2 is drop ack
     if(droppc == 0){
@@ -591,6 +591,9 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
     droppc_settings.droppc_decimal = (float)((float)droppc / (float)100);
 
     // cout << "droppc_decimal: " << droppc_settings.droppc_decimal << "\n";
+
+    //set recv buffer size
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &recv_buffer, sizeof(recv_buffer));
 
     for(;;){
 
@@ -605,6 +608,7 @@ void do_server_processing(int sockfd, sockaddr *pcliaddr, socklen_t clilen, int 
 
         //get a packet
         len = clilen;
+
         n = recvfrom(sockfd, mesg, BUFFERLENGTH, 0, (struct sockaddr*)&cliaddr, &len); //reads datagram
         if(n < 0){
             cerr << "recvfrom() failed.\n Exiting now.\n";
