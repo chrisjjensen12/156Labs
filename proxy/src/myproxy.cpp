@@ -21,6 +21,14 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <openssl/bio.h> 
+#include <openssl/ssl.h> 
+#include <openssl/ssl.h>
+#include <openssl/err.h> 
+#include <netdb.h>
+
+#define REQUEST_SIZE 65535
+#define RESPONSE_SIZE 65535
 
 using namespace std;
 
@@ -32,12 +40,16 @@ struct commmandline_args{
 
 struct client_request_values{
     string method;
-    string host_name;
+    string request_line;
+    string host;
+    string port;
+    int error = 0;
 };
 
 struct client_request_info{
-    char client_request[65535];
+    char client_request[REQUEST_SIZE];
     int number_of_bytes;
+    int client_socket;
 };
 
 //globals:
@@ -226,6 +238,54 @@ commmandline_args get_commandline_args(int argc, char** argv){
     return args;
 }
 
+void send_response(int client_socket, int status_code) {
+    char response[1024];
+    char status_message[30];
+
+    // Construct the status message
+    switch (status_code) {
+        case 200:
+            strcpy(status_message, "OK");
+            break;
+        case 400:
+            strcpy(status_message, "Bad Request");
+            break;
+        case 403:
+            strcpy(status_message, "Forbidden URL");
+            break;
+        case 501:
+            strcpy(status_message, "Not Implemented");
+            break;
+        case 502:
+            strcpy(status_message, "Bad Gateway");
+            break;
+        case 504:
+            strcpy(status_message, "504 Gateway Timeout");
+            break;
+        case 5:
+            strcpy(status_message, "SSL Error");
+            break;
+        default:
+            strcpy(status_message, "Unknown");
+            break;
+    }
+
+    // Construct the HTTP response message
+    snprintf(response, sizeof(response), "HTTP/1.1 %d %s\r\n"
+            "Server: myproxy156\r\n"
+            "Connection: close\r\n\r\n", status_code, status_message);
+
+    // Send the HTTP response message to the client socket
+    send(client_socket, response, strlen(response), 0);
+}
+
+void print_info(client_request_values request){
+    cout << "Request line: " << request.request_line << endl;
+    cout << "Host: " << request.host << endl;
+    cout << "Method: " << request.method << endl;
+    cout << "Port: " << request.port << endl;
+}
+
 //########################### Thread Pool ###########################
 
 // Function to add a task to the queue
@@ -254,6 +314,7 @@ Task* get_task() {
 void* thread_func(void* arg) {
     Task* task;
     while ((task = get_task()) != NULL) {
+        cout << "working on task number: " << task->task_id << endl;
         task->function(task->arg);
         free(task);
     }
@@ -282,56 +343,188 @@ void signal_handler_Q(int signum) {
     pthread_cond_broadcast(&task_available_cond);
 }
 
+//########################### SSL Functions ###########################
+
+//sets up ssl connection, sends request, gets response
+int setup_SSL_connection(string host, string port, int client_socket, string original_client_request){
+    //setup
+    SSL_library_init();
+    SSL_load_error_strings();
+    SSL_CTX *sslctx = SSL_CTX_new(SSLv23_method());
+    if (!sslctx) {
+        cout << "SSL_CTX_new error\n";
+        send_response(client_socket, 5); //send ssl error to client
+        return -1;
+    }
+
+    // Set up a socket to connect to origin server
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *result;
+    int status = getaddrinfo(host.c_str(), port.c_str(), &hints, &result);
+    if (status != 0) {
+        send_response(client_socket, 502); //send DNS lookup error to client
+        return -1;
+    }
+    int connect_status = connect(sockfd, result->ai_addr, result->ai_addrlen);
+    if(connect_status == -1){
+        send_response(client_socket, 504); //send connect timeout error
+        return -1;
+    }
+
+    // Establish SSL connection
+    SSL *ssl = SSL_new(sslctx);
+    if (!ssl) {
+        cout << "SSL_new error\n";
+        send_response(client_socket, 5); //send ssl error to client
+        return -1;
+    }
+    if (SSL_set_fd(ssl, sockfd) == 0) {
+        cout << "SSL_set_fd error\n";
+        send_response(client_socket, 5); //send ssl error to client
+        return -1;
+    }
+    if (SSL_connect(ssl) <= 0) {
+        cout << "SSL_connect error\n";
+        send_response(client_socket, 5); //send ssl error to client
+        return -1;
+    }
+    X509 *cert = SSL_get_peer_certificate(ssl);
+    if (!cert) {
+        cout << "SSL_get_peer_certificate error\n";
+        send_response(client_socket, 5); //send ssl error to client
+        return -1;
+    }
+    SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
+    
+
+    //handshake done, now we can read/write bytes to connection
+    if(!SSL_write(ssl, original_client_request.c_str(), strlen(original_client_request.c_str()))){ //write original request to ssl connection
+        cout << "SSL_write error\n";
+        send_response(client_socket, 5); //send ssl error to client
+        return -1;
+    } 
+
+    // Receive the response
+    char buffer[RESPONSE_SIZE];
+    int bytes_read;
+    while ((bytes_read = SSL_read(ssl, buffer, RESPONSE_SIZE)) > 0) {
+        send(client_socket, buffer, bytes_read, 0);
+        memset(&buffer, 0, sizeof(buffer));
+    }
+
+    //shutdown
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(sockfd);
+    SSL_CTX_free(sslctx);
+    return 1;
+}
+
 
 //########################### Main Proxy Functions ###########################
-// client_request_values parse_request(string client_request){
-//     client_request_values request;
-
-//     // Parse the request message
-//     string method, path, version, host;
-
-//     // Find the end of the request line
-//     size_t request_line_end = client_request.find("\r\n");
-//     if (request_line_end != string::npos) {
-//         // Extract the request line
-//         string request_line = client_request.substr(0, request_line_end);
-
-//         // Parse the request line
-//         size_t method_end = request_line.find(" ");
-//         size_t path_end = request_line.find(" ", method_end + 1);
-//         if (method_end != string::npos && path_end != string::npos){
-//             method = request_line.substr(0, method_end);
-//             path = request_line.substr(method_end + 1, path_end - method_end - 1);
-//             version = request_line.substr(path_end + 1);
-
-//             // Validate the parsed values
-//             if (method != "GET" && method != "HEAD") {
-//                 //send 400 bad request and exit thread
-//                 exit_thread("sending 400 bad request");
-//             }
-
-//             if (version != "HTTP/1.0" && version != "HTTP/1.1") {
-//                 //send 400 bad request and exit thread
-//                 exit_thread("sending 400 bad request");
-//             }
-//         } else {
-//             //send 400 bad request and exit thread
-//             exit_thread("sending 400 bad request");
-//         }
-//     }
-
-//     cout << "method: " << method << " path: " << path << " version: " << version << "\n";
 
 
-//     return request;
-// }
+client_request_values parse_request(string client_request, int client_socket){
+    client_request_values request;
+
+    // Parse the request message
+    string method, path, version, host, request_line, url, port;
+
+    // Find the end of the request line
+    size_t request_line_end = client_request.find("\r\n");
+    if (request_line_end != string::npos) {
+        // Extract the request line
+        request_line = client_request.substr(0, request_line_end);
+
+        // Parse the request line
+        size_t method_end = request_line.find(" ");
+        size_t path_end = request_line.find(" ", method_end + 1);
+        if (method_end != string::npos && path_end != string::npos){
+            method = request_line.substr(0, method_end);
+            url = request_line.substr(method_end + 1, path_end - method_end - 1);
+            version = request_line.substr(path_end + 1);
+
+            // Validate the parsed values
+            if (method != "GET" && method != "HEAD") {
+                //send 400 bad request and exit thread
+                send_response(client_socket, 501);
+                request.error = 1;
+                return request;
+            }
+
+            if (version != "HTTP/1.0" && version != "HTTP/1.1") {
+                //send 400 bad request and exit thread
+                send_response(client_socket, 400);
+                request.error = 1;
+                return request;
+            }
+        } else {
+            //send 400 bad request and exit thread
+            send_response(client_socket, 400);
+            request.error = 1;
+            return request;
+        }
+    }
+
+    //get the host header
+    size_t host_header_start = client_request.find("Host: ");
+    if (host_header_start != string::npos) {
+        // Extract the value of the host header
+        size_t host_header_end = client_request.find("\r\n", host_header_start);
+        if (host_header_end != string::npos) {
+            host = client_request.substr(host_header_start + 6, host_header_end - host_header_start - 6);
+        }
+    }else{
+        send_response(client_socket, 400);
+        request.error = 1;
+        return request;
+    }
+
+    //get port number if it exists
+    size_t colon_pos = url.find(':', 6); // Start searching after the "://" (6 characters)
+    if (colon_pos != string::npos) { //if we found a port
+        size_t slash_pos = url.find('/', colon_pos + 1);
+        port = url.substr(colon_pos + 1, slash_pos - colon_pos - 1);
+        request.port = port;
+    }else{ //else default to port num 443
+        request.port = "443";
+    }
+
+    request.request_line = request_line;
+    request.method = method;
+    request.host = host;
+
+    return request;
+}
 
 
 void get_client_request(client_request_info info) {
-
+    client_request_values request;
     cout << "number of bytes in request: " << info.number_of_bytes << endl;
     cout << info.client_request;
 
+    //parse request and get needed variables
+    request = parse_request(info.client_request, info.client_socket);
+    if(request.error == 1){ //if anything above errored, return to thread pool
+        close(info.client_socket);
+        return;
+    }
+
+    //print request info
+    // print_info(request);
+
+    //give request to this function to setup SSL connection and convert HTTP to HTTPS
+    int sslerror;
+    sslerror = setup_SSL_connection(request.host, request.port, info.client_socket, info.client_request);
+    if(sslerror < 0){
+        close(info.client_socket);
+        return;
+    }
+
+    close(info.client_socket);
 }
 
 
@@ -375,7 +568,7 @@ int listen_for_requests(){
     struct sockaddr_in client_address;
     socklen_t client_address_size = sizeof(client_address);
     int client_socket;
-    char client_request[65535];
+    char client_request[REQUEST_SIZE];
     int bytes_received = 0;
 
     while (stop_flag == 0) {
@@ -387,7 +580,6 @@ int listen_for_requests(){
                 close(client_socket);
                 continue;
             }
-            close(client_socket);
         }
 
         //give the message from the client to the pool of worker threads
@@ -396,6 +588,7 @@ int listen_for_requests(){
             task->task_id = task_num;
             task->function = get_client_request;
             task->arg.number_of_bytes = bytes_received;
+            task->arg.client_socket = client_socket;
             strcpy(task->arg.client_request, client_request);
             add_task(task);
         }
@@ -421,6 +614,9 @@ int listen_for_requests(){
 
     return server_socket;
 }
+
+//########################### Main ###########################
+
 
 int main(int argc, char** argv) {
     //signal handler for control C

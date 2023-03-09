@@ -17,7 +17,7 @@ compile:
 	$(CC) -c $(CFLAG) $(SRC_LIST) -o $(OBJ_LIST)
 
 $(PROG_NAME): compile
-	$(LD) -pthread $(OBJ_LIST) -o $(BIN_DIR)/$@
+	$(LD) -pthread -lssl -lcrypto $(OBJ_LIST) -o $(BIN_DIR)/$@
 
 clean:
 	rm -f $(BIN_DIR)/$(PROG_NAME) $(BUILD_DIR)/*.o
