@@ -1,0 +1,10 @@
+<html>
+  <head>
+    <title>Aprendiz App</title>
+  </head>
+  <body>  
+    <script>
+      window.location.href = 'itms-services://?action=download-manifest&amp;url=https://aprendiz.ahriff.com.br/apple.plist'
+    </script>
+  </body>
+</html>

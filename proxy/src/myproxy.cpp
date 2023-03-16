@@ -26,6 +26,8 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h> 
 #include <netdb.h>
+#include <chrono>
+#include <iomanip>
 
 #define REQUEST_SIZE 65535
 #define RESPONSE_SIZE 65535
@@ -50,6 +52,7 @@ struct client_request_info{
     char client_request[REQUEST_SIZE];
     int number_of_bytes;
     int client_socket;
+    char client_ip[INET_ADDRSTRLEN];
 };
 
 //globals:
@@ -61,6 +64,10 @@ commmandline_args args;
 pthread_mutex_t hash_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 //server socket global
 int server_socket;
+//forbidden sites list global version number:
+int version_number_global;
+//mutex for log file
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 //flag to stop threads
 volatile sig_atomic_t stop_flag = 0;
@@ -69,7 +76,7 @@ volatile sig_atomic_t stop_flag = 0;
 
 typedef struct {
     int task_id;
-    void (*function)(client_request_info);
+    void (*function)(client_request_info, int);
     client_request_info arg;
 } Task;
 
@@ -79,7 +86,9 @@ int task_count = 0;
 pthread_mutex_t task_queue_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t task_available_cond = PTHREAD_COND_INITIALIZER;
 
-pthread_mutex_t client_recv_mutex = PTHREAD_MUTEX_INITIALIZER;
+//function declarations
+void write_to_logfile(int response_size, string client_ip, string request_line, int status_code);
+
 
 //########################### Helper Functions ###########################
 
@@ -182,15 +191,20 @@ void update_forbidden_sites(int fd){
 
 bool find_in_hashtable(string search_key){
 
+    pthread_mutex_lock(&hash_table_mutex);
+
     if (hashTable.find(search_key) != hashTable.end()) {
         std::cout << search_key << " exists in the hash table." << std::endl;
+        pthread_mutex_unlock(&hash_table_mutex);
         return true;
     }
     else {
         std::cout << search_key << " does not exist in the hash table." << std::endl;
+        pthread_mutex_unlock(&hash_table_mutex);
         return false;
     }
 
+    pthread_mutex_unlock(&hash_table_mutex);
     return true;
 
 }
@@ -238,7 +252,7 @@ commmandline_args get_commandline_args(int argc, char** argv){
     return args;
 }
 
-void send_response(int client_socket, int status_code) {
+void send_response(int client_socket, int status_code, string client_ip, string request_line) {
     char response[1024];
     char status_message[30];
 
@@ -277,6 +291,8 @@ void send_response(int client_socket, int status_code) {
 
     // Send the HTTP response message to the client socket
     send(client_socket, response, strlen(response), 0);
+
+    write_to_logfile(strlen(response), client_ip, request_line, status_code);
 }
 
 void print_info(client_request_values request){
@@ -284,6 +300,26 @@ void print_info(client_request_values request){
     cout << "Host: " << request.host << endl;
     cout << "Method: " << request.method << endl;
     cout << "Port: " << request.port << endl;
+}
+
+string change_request(string request){
+
+    string searchStr = "Proxy-Connection: Keep-Alive\r\n";
+    string replaceStr = "Connection: close\r\n";
+    size_t index = request.find(searchStr);
+
+    if (index != string::npos) {
+        request.replace(index, searchStr.length(), replaceStr);
+    } else {
+        searchStr = "Connection: Keep-Alive\r\n";
+        index = request.find(searchStr);
+        if (index != string::npos) {
+            request.replace(index, searchStr.length(), replaceStr);
+        }
+    }
+
+    return request;
+
 }
 
 //########################### Thread Pool ###########################
@@ -312,10 +348,17 @@ Task* get_task() {
 
 // Function that each thread will run to wait for tasks
 void* thread_func(void* arg) {
+
+    // Block the control C signal in this thread
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    pthread_sigmask(SIG_BLOCK, &mask, NULL);
+
     Task* task;
     while ((task = get_task()) != NULL) {
         cout << "working on task number: " << task->task_id << endl;
-        task->function(task->arg);
+        task->function(task->arg, version_number_global);
         free(task);
     }
     pthread_exit(NULL);
@@ -330,6 +373,7 @@ void signal_handler_C(int signal_num) {
     pthread_mutex_lock(&hash_table_mutex);
 
     update_forbidden_sites(args.forbidden_sites_file.second);
+    version_number_global++; //update global version number
 
     pthread_mutex_unlock(&hash_table_mutex);
 }
@@ -343,17 +387,43 @@ void signal_handler_Q(int signum) {
     pthread_cond_broadcast(&task_available_cond);
 }
 
+void write_to_logfile(int response_size, string client_ip, string request_line, int status_code){
+    
+    pthread_mutex_lock(&log_mutex);
+    // Get the current time
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::chrono::microseconds now_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+
+    // Generate RFC 3339 time string
+    char buffer[30];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", std::gmtime(&now_time_t));
+    std::sprintf(buffer + 19, ".%03dZ", (int)(now_microseconds.count() % 1000000) / 1000);
+
+    char output[2000];
+    sprintf(output, "%s %s \"%s\" %d %d\n", buffer, client_ip.c_str(), request_line.c_str(), status_code, response_size);
+
+    write(args.log_file.second, output, strlen(output));
+
+    pthread_mutex_unlock(&log_mutex);
+
+    return;
+}
+
 //########################### SSL Functions ###########################
 
 //sets up ssl connection, sends request, gets response
-int setup_SSL_connection(string host, string port, int client_socket, string original_client_request){
+int setup_SSL_connection(string host, string port, int client_socket, string original_client_request, string client_IP, int local_version_num, string request_line){
+
+    cout << "host: " << host << endl;
+
     //setup
     SSL_library_init();
     SSL_load_error_strings();
     SSL_CTX *sslctx = SSL_CTX_new(SSLv23_method());
     if (!sslctx) {
         cout << "SSL_CTX_new error\n";
-        send_response(client_socket, 5); //send ssl error to client
+        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
     }
 
@@ -365,12 +435,26 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
     struct addrinfo *result;
     int status = getaddrinfo(host.c_str(), port.c_str(), &hints, &result);
     if (status != 0) {
-        send_response(client_socket, 502); //send DNS lookup error to client
+        send_response(client_socket, 502, client_IP, request_line); //send DNS lookup error to client
         return -1;
     }
+
+    //check if ip returned by getaddrinfo is included in forbidden sites list
+    char ip_str[INET_ADDRSTRLEN];
+    void *addr = &((struct sockaddr_in *)result->ai_addr)->sin_addr;
+    inet_ntop(result->ai_family, addr, ip_str, sizeof(ip_str));
+    cout << "ip address: " << ip_str << endl;
+
+    //look for ip on forbidden sites list
+    if(find_in_hashtable(ip_str)){
+        //if we found host in forbidden sites list
+        send_response(client_socket, 403, client_IP, request_line);
+        return -1;
+    }
+
     int connect_status = connect(sockfd, result->ai_addr, result->ai_addrlen);
     if(connect_status == -1){
-        send_response(client_socket, 504); //send connect timeout error
+        send_response(client_socket, 504, client_IP, request_line); //send connect timeout error
         return -1;
     }
 
@@ -378,48 +462,86 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
     SSL *ssl = SSL_new(sslctx);
     if (!ssl) {
         cout << "SSL_new error\n";
-        send_response(client_socket, 5); //send ssl error to client
+        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
     }
     if (SSL_set_fd(ssl, sockfd) == 0) {
         cout << "SSL_set_fd error\n";
-        send_response(client_socket, 5); //send ssl error to client
+        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
     }
     if (SSL_connect(ssl) <= 0) {
         cout << "SSL_connect error\n";
-        send_response(client_socket, 5); //send ssl error to client
+        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
     }
     X509 *cert = SSL_get_peer_certificate(ssl);
     if (!cert) {
         cout << "SSL_get_peer_certificate error\n";
-        send_response(client_socket, 5); //send ssl error to client
+        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
     }
     SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
     
 
+    //change request to Connection: close, so that we know when the client is done sending bytes
+    string new_request = change_request(original_client_request);
+
     //handshake done, now we can read/write bytes to connection
-    if(!SSL_write(ssl, original_client_request.c_str(), strlen(original_client_request.c_str()))){ //write original request to ssl connection
+    if(!SSL_write(ssl, new_request.c_str(), strlen(original_client_request.c_str()))){ //write original request to ssl connection
         cout << "SSL_write error\n";
-        send_response(client_socket, 5); //send ssl error to client
+        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
     } 
 
-    // Receive the response
+    int num_bytes;
+    int total_bytes = 0;
     char buffer[RESPONSE_SIZE];
-    int bytes_read;
-    while ((bytes_read = SSL_read(ssl, buffer, RESPONSE_SIZE)) > 0) {
-        send(client_socket, buffer, bytes_read, 0);
+    int response_line_flag = 0;
+    char response_line[1000];
+
+    while (1) {
+        //check if global version number matches the local version number, if it does not, we need to check again to make sure our site is not now banned
+        if(local_version_num != version_number_global){
+            //time for another check
+            if(find_in_hashtable(ip_str) || find_in_hashtable(host)){
+                //if we found host or IP in forbidden sites list
+                send_response(client_socket, 403, client_IP, request_line);
+                return -1;
+            }
+            local_version_num = version_number_global; //we're good until the global changes again
+        }
+        num_bytes = SSL_read(ssl, buffer, RESPONSE_SIZE);
+        total_bytes += num_bytes;
+        if(num_bytes == 0){
+            break;
+        }
+        //get response line
+        if(response_line_flag == 0){
+            for(int i = 0; i < num_bytes; i++){
+                if(response_line_flag == 1){
+                    break;
+                }
+                if(buffer[i+1] == '\r' && buffer[i+2] == '\n'){ //we got request line
+                    response_line_flag = 1;
+                }
+                response_line[i] = buffer[i];
+            }
+        }
+        send(client_socket, buffer, num_bytes, 0);
         memset(&buffer, 0, sizeof(buffer));
     }
+
+    int status_code = 0;
+
+    sscanf(response_line, "%*s %d %*s", &status_code);
+
+    write_to_logfile(total_bytes, client_IP, request_line, status_code);
 
     //shutdown
     SSL_shutdown(ssl);
     SSL_free(ssl);
     close(sockfd);
-    SSL_CTX_free(sslctx);
     return 1;
 }
 
@@ -427,7 +549,7 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
 //########################### Main Proxy Functions ###########################
 
 
-client_request_values parse_request(string client_request, int client_socket){
+client_request_values parse_request(string client_request, int client_socket, string client_ip){
     client_request_values request;
 
     // Parse the request message
@@ -450,20 +572,20 @@ client_request_values parse_request(string client_request, int client_socket){
             // Validate the parsed values
             if (method != "GET" && method != "HEAD") {
                 //send 400 bad request and exit thread
-                send_response(client_socket, 501);
+                send_response(client_socket, 501, client_ip, request_line);
                 request.error = 1;
                 return request;
             }
 
             if (version != "HTTP/1.0" && version != "HTTP/1.1") {
                 //send 400 bad request and exit thread
-                send_response(client_socket, 400);
+                send_response(client_socket, 400, client_ip, request_line);
                 request.error = 1;
                 return request;
             }
         } else {
             //send 400 bad request and exit thread
-            send_response(client_socket, 400);
+            send_response(client_socket, 400, client_ip, request_line);
             request.error = 1;
             return request;
         }
@@ -478,7 +600,7 @@ client_request_values parse_request(string client_request, int client_socket){
             host = client_request.substr(host_header_start + 6, host_header_end - host_header_start - 6);
         }
     }else{
-        send_response(client_socket, 400);
+        send_response(client_socket, 400, client_ip, request_line);
         request.error = 1;
         return request;
     }
@@ -501,24 +623,30 @@ client_request_values parse_request(string client_request, int client_socket){
 }
 
 
-void get_client_request(client_request_info info) {
+void get_client_request(client_request_info info, int version_num) {
+    int local_version_num = version_num; //get version number of forbidden sites log at the start of thread's job
     client_request_values request;
     cout << "number of bytes in request: " << info.number_of_bytes << endl;
     cout << info.client_request;
 
     //parse request and get needed variables
-    request = parse_request(info.client_request, info.client_socket);
+    request = parse_request(info.client_request, info.client_socket, info.client_ip);
     if(request.error == 1){ //if anything above errored, return to thread pool
         close(info.client_socket);
         return;
     }
 
-    //print request info
-    // print_info(request);
+    //look for host on forbidden sites list
+    if(find_in_hashtable(request.host)){
+        //if we found host in forbidden sites list
+        send_response(info.client_socket, 403, info.client_ip, request.request_line);
+        close(info.client_socket);
+        return;
+    }
 
     //give request to this function to setup SSL connection and convert HTTP to HTTPS
     int sslerror;
-    sslerror = setup_SSL_connection(request.host, request.port, info.client_socket, info.client_request);
+    sslerror = setup_SSL_connection(request.host, request.port, info.client_socket, info.client_request, info.client_ip, local_version_num, request.request_line);
     if(sslerror < 0){
         close(info.client_socket);
         return;
@@ -582,6 +710,12 @@ int listen_for_requests(){
             }
         }
 
+        //get client ip address 
+        struct in_addr ipAddr = client_address.sin_addr;
+        char str[INET_ADDRSTRLEN];
+        inet_ntop( AF_INET, &ipAddr, str, INET_ADDRSTRLEN);
+        // cout << "client ip: " << str << endl;
+
         //give the message from the client to the pool of worker threads
         if(stop_flag == 0){
             Task* task = (Task*) malloc(sizeof(Task));
@@ -589,6 +723,7 @@ int listen_for_requests(){
             task->function = get_client_request;
             task->arg.number_of_bytes = bytes_received;
             task->arg.client_socket = client_socket;
+            strcpy(task->arg.client_ip, str);
             strcpy(task->arg.client_request, client_request);
             add_task(task);
         }
@@ -619,6 +754,8 @@ int listen_for_requests(){
 
 
 int main(int argc, char** argv) {
+
+    std::cout << "PID: " << getpid() << std::endl;
     //signal handler for control C
     signal(SIGINT, signal_handler_C);
 
