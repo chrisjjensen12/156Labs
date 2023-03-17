@@ -194,12 +194,12 @@ bool find_in_hashtable(string search_key){
     pthread_mutex_lock(&hash_table_mutex);
 
     if (hashTable.find(search_key) != hashTable.end()) {
-        std::cout << search_key << " exists in the hash table." << std::endl;
+        std::cerr << search_key << " exists in the forbidden sites file. Exiting now." << std::endl;
         pthread_mutex_unlock(&hash_table_mutex);
         return true;
     }
     else {
-        std::cout << search_key << " does not exist in the hash table." << std::endl;
+        std::cerr << search_key << " does not exist in the forbidden sites file. Continuing service." << std::endl;
         pthread_mutex_unlock(&hash_table_mutex);
         return false;
     }
@@ -276,8 +276,8 @@ void send_response(int client_socket, int status_code, string client_ip, string 
         case 504:
             strcpy(status_message, "504 Gateway Timeout");
             break;
-        case 5:
-            strcpy(status_message, "SSL Error");
+        case 500:
+            strcpy(status_message, "Internal Server Error");
             break;
         default:
             strcpy(status_message, "Unknown");
@@ -337,7 +337,7 @@ void* thread_func(void* arg) {
 
     Task* task;
     while ((task = get_task()) != NULL) {
-        cout << "working on task number: " << task->task_id << endl;
+        // cout << "working on task number: " << task->task_id << endl;
         task->function(task->arg, version_number_global);
         free(task);
     }
@@ -348,7 +348,7 @@ void* thread_func(void* arg) {
 
 // signal handler function
 void signal_handler_C(int signal_num) {
-    cout << "got control C, updating file now" << endl;
+    cerr << "got control C, updating file now" << endl;
 
     pthread_mutex_lock(&hash_table_mutex);
 
@@ -360,7 +360,7 @@ void signal_handler_C(int signal_num) {
 
 // Define the signal handler function
 void signal_handler_Q(int signum) {
-    cout << "Got SIGQUIT, setting flag and exiting now" << endl;
+    cerr << "Got SIGQUIT, setting flag and exiting now" << endl;
     stop_flag = 1;
     //close server socket so we don't get stuck on accept() or recv()
     close(server_socket);
@@ -404,8 +404,8 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
     SSL_load_error_strings();
     SSL_CTX *sslctx = SSL_CTX_new(SSLv23_method());
     if (!sslctx) {
-        cout << "SSL_CTX_new error\n";
-        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
+        cerr << "SSL_CTX_new error\n";
+        send_response(client_socket, 500, client_IP, request_line); //send ssl error to client
         return -1;
     }
 
@@ -417,7 +417,8 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
 
     //perform DNS lookup
     if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) {
-        cout << "getaddrinfo error\n";
+        cerr << "getaddrinfo error\n";
+        send_response(client_socket, 502, client_IP, request_line);
         return -1;
     }
 
@@ -480,24 +481,24 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
     // Establish SSL connection
     SSL *ssl = SSL_new(sslctx);
     if (!ssl) {
-        cout << "SSL_new error\n";
-        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
+        cerr << "SSL_new error\n";
+        send_response(client_socket, 500, client_IP, request_line); //send ssl error to client
         return -1;
     }
     if (SSL_set_fd(ssl, sockfd) == 0) {
-        cout << "SSL_set_fd error\n";
-        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
+        cerr << "SSL_set_fd error\n";
+        send_response(client_socket, 500, client_IP, request_line); //send ssl error to client
         return -1;
     }
     if (SSL_connect(ssl) <= 0) {
-        cout << "SSL_connect error\n";
-        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
+        cerr << "SSL_connect error\n";
+        send_response(client_socket, 500, client_IP, request_line); //send ssl error to client
         return -1;
     }
     X509 *cert = SSL_get_peer_certificate(ssl);
     if (!cert) {
-        cout << "SSL_get_peer_certificate error\n";
-        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
+        cerr << "SSL_get_peer_certificate error\n";
+        send_response(client_socket, 504, client_IP, request_line); //send ssl error to client
         return -1;
     }
     SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
@@ -505,21 +506,32 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
     cerr << "Writing request to server\n";
     //handshake done, now we can read/write bytes to connection
     if(!SSL_write(ssl, original_client_request.c_str(), strlen(original_client_request.c_str()))){ //write original request to ssl connection
-        cout << "SSL_write error\n";
-        send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
+        cerr << "SSL_write error\n";
+        send_response(client_socket, 500, client_IP, request_line); //send ssl error to client
         return -1;
     } 
 
     int num_bytes;
     int total_bytes = 0;
     char buffer[RESPONSE_SIZE];
-    // int response_line_flag = 0;
-    // char response_line[1000];
     int content_length = 0;
     bool chunked_encoding = false;
+    bool got_content_length = false;
+    bool is_head_request = false;
+    int response_line_flag = 0;
+    char response_line[500];
+    char *content_length_ptr;
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(sockfd, &readfds);
+
+    size_t found = original_client_request.find("HEAD");
+    if (found != std::string::npos) {
+        cerr << "found head request" << endl;
+        is_head_request = true;
+    } else {
+        cerr << "not head request" << endl;
+    }
 
     struct timeval timeout;
     timeout.tv_sec = 5; // set the timeout value to 5 seconds
@@ -527,6 +539,16 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
 
     cerr << "Receving response from server\n";
     while (1) {
+
+        if(local_version_num != version_number_global){
+            //time for another check
+            if(find_in_hashtable(ipstr) || find_in_hashtable(host)){
+                //if we found host or IP in forbidden sites list
+                send_response(client_socket, 403, client_IP, request_line);
+                return -1;
+            }
+            local_version_num = version_number_global; //we're good until the global changes again
+        }
         
         int ret = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
 
@@ -539,43 +561,63 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
         num_bytes = SSL_read(ssl, buffer, RESPONSE_SIZE);
         send(client_socket, buffer, num_bytes, 0);
         total_bytes += num_bytes;
+
         // Check if the response uses chunked encoding
         if (strstr(buffer, "Transfer-Encoding: chunked")) {
             chunked_encoding = true;
         }
-        // Parse the Content-Length header if it exists
-        char *content_length_ptr = strstr(buffer, "Content-Length: ");
-        if (content_length_ptr != NULL) {
-            content_length = atoi(content_length_ptr + 16);
+
+        if(!got_content_length){
+             // Parse the Content-Length header if it exists
+            content_length_ptr = strstr(buffer, "Content-Length: ");
+            if (content_length_ptr != NULL) {
+                content_length = atoi(content_length_ptr + 16);
+                got_content_length = true;
+                memset(&content_length_ptr, 0, sizeof(content_length_ptr));
+            }
         }
 
-        //if chunked encoding, look for the last chunk
-        if(chunked_encoding){
-            char* p = buffer + total_bytes - num_bytes;
-            int chunk_size = strtol(p, &p, 16);
-            if (chunk_size == 0) {
-                cerr << "got last chunk" << endl;
+        // get response line
+        if(response_line_flag == 0){
+            for(int i = 0; i < num_bytes; i++){
+                if(response_line_flag == 1){
+                    break;
+                }
+                if(buffer[i+1] == '\r' && buffer[i+2] == '\n'){ //we got request line
+                    response_line_flag = 1;
+                }
+                response_line[i] = buffer[i];
             }
         }
 
         // Break out of the loop once we have received the full response
         if (!chunked_encoding && total_bytes >= content_length) {
+            cerr << "non chunked encoding message finished" << endl;
             break;
         }
+
+        if(is_head_request){
+            if(strstr(buffer, "\r\n\r\n")){
+                cerr << "head request finished" << endl; 
+                break;
+            }
+        }
+
+        // cout << "loop" << endl;
         memset(&buffer, 0, sizeof(buffer));
     }
 
     if(chunked_encoding){
-        cout << "chunked encoding" << endl;
+        cerr << "chunked encoding" << endl;
     }else{
-        cout << "content-length: " << content_length << endl;
+        cerr << "content-length: " << content_length << endl;
     }
 
-    // int status_code = 0;
+    int status_code = 0;
 
-    // sscanf(response_line, "%*s %d %*s", &status_code);
+    sscanf(response_line, "%*s %d %*s", &status_code);
 
-    // write_to_logfile(total_bytes, client_IP, request_line, status_code);
+    write_to_logfile(total_bytes, client_IP, request_line, status_code);
 
     cerr << "Response finished, shutting down SSL connection\n\n";
     //shutdown
@@ -646,11 +688,19 @@ client_request_values parse_request(string client_request, int client_socket, st
     }
 
     //get port number if it exists
+    int num;
     size_t colon_pos = url.find(':', 6); // Start searching after the "://" (6 characters)
     if (colon_pos != string::npos) { //if we found a port
         size_t slash_pos = url.find('/', colon_pos + 1);
         port = url.substr(colon_pos + 1, slash_pos - colon_pos - 1);
-        request.port = port;
+        std::stringstream ss(port);
+        if (ss >> num) {
+            request.port = port;
+        } else {
+            send_response(client_socket, 400, client_ip, request_line);
+            request.error = 1;
+            return request;
+        }
     }else{ //else default to port num 443
         request.port = "443";
     }
@@ -666,8 +716,8 @@ client_request_values parse_request(string client_request, int client_socket, st
 void get_client_request(client_request_info info, int version_num) {
     int local_version_num = version_num; //get version number of forbidden sites log at the start of thread's job
     client_request_values request;
-    cout << "number of bytes in request: " << info.number_of_bytes << endl;
-    cout << info.client_request;
+    // cout << "number of bytes in request: " << info.number_of_bytes << endl;
+    // cout << info.client_request;
 
     //parse request and get needed variables
     request = parse_request(info.client_request, info.client_socket, info.client_ip);
@@ -784,7 +834,7 @@ int listen_for_requests(){
 
     if(completed_joins == 50){
         //all threads joined
-        cout << "all threads joined\n";
+        cerr << "all threads joined\n";
     }
 
     return server_socket;
@@ -795,7 +845,7 @@ int listen_for_requests(){
 
 int main(int argc, char** argv) {
 
-    std::cout << "PID: " << getpid() << std::endl;
+    cerr << "PID (to manually terminate): " << getpid() << "\n" << endl;
     //signal handler for control C
     signal(SIGINT, signal_handler_C);
 
