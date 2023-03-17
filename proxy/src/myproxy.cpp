@@ -265,7 +265,7 @@ void send_response(int client_socket, int status_code, string client_ip, string 
             strcpy(status_message, "Bad Request");
             break;
         case 403:
-            strcpy(status_message, "Forbidden URL");
+            strcpy(status_message, "Forbidden");
             break;
         case 501:
             strcpy(status_message, "Not Implemented");
@@ -300,26 +300,6 @@ void print_info(client_request_values request){
     cout << "Host: " << request.host << endl;
     cout << "Method: " << request.method << endl;
     cout << "Port: " << request.port << endl;
-}
-
-string change_request(string request){
-
-    string searchStr = "Proxy-Connection: Keep-Alive\r\n";
-    string replaceStr = "Connection: close\r\n";
-    size_t index = request.find(searchStr);
-
-    if (index != string::npos) {
-        request.replace(index, searchStr.length(), replaceStr);
-    } else {
-        searchStr = "Connection: Keep-Alive\r\n";
-        index = request.find(searchStr);
-        if (index != string::npos) {
-            request.replace(index, searchStr.length(), replaceStr);
-        }
-    }
-
-    return request;
-
 }
 
 //########################### Thread Pool ###########################
@@ -415,9 +395,11 @@ void write_to_logfile(int response_size, string client_ip, string request_line, 
 //sets up ssl connection, sends request, gets response
 int setup_SSL_connection(string host, string port, int client_socket, string original_client_request, string client_IP, int local_version_num, string request_line){
 
-    cout << "host: " << host << endl;
+    int sockfd;
+    char ipstr[INET6_ADDRSTRLEN];
 
     //setup
+    cerr << "setting up SSL library\n";
     SSL_library_init();
     SSL_load_error_strings();
     SSL_CTX *sslctx = SSL_CTX_new(SSLv23_method());
@@ -427,37 +409,74 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
         return -1;
     }
 
-    // Set up a socket to connect to origin server
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    struct addrinfo hints = {};
-    hints.ai_family = AF_INET;
+    cerr << "performing DNS lookup\n";
+    struct addrinfo hints, *res, *p;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *result;
-    int status = getaddrinfo(host.c_str(), port.c_str(), &hints, &result);
-    if (status != 0) {
-        send_response(client_socket, 502, client_IP, request_line); //send DNS lookup error to client
+
+    //perform DNS lookup
+    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0) {
+        cout << "getaddrinfo error\n";
         return -1;
     }
 
-    //check if ip returned by getaddrinfo is included in forbidden sites list
-    char ip_str[INET_ADDRSTRLEN];
-    void *addr = &((struct sockaddr_in *)result->ai_addr)->sin_addr;
-    inet_ntop(result->ai_family, addr, ip_str, sizeof(ip_str));
-    cout << "ip address: " << ip_str << endl;
+    if (res == NULL) {
+        cerr << "getaddrinfo: No addresses found for hostname" << endl;
+        send_response(client_socket, 502, client_IP, request_line);
+        return -1;
+    }
 
+    // loop through all the results and try to connect to each one
+    for (p = res; p != NULL; p = p->ai_next) {
+        // create a socket for this address
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd == -1) {
+            perror("socket");
+            continue; // try the next address
+        }
+
+        // try to connect to this address
+        if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+            close(sockfd);
+            perror("connect");
+            continue; // try the next address
+        }
+
+        // if we get here, we have successfully connected to an address
+        break;
+    }
+
+    if (p == NULL) {
+        // we were unable to connect to any of the addresses
+        cerr << "We were unable to connect to any of the addresses" << endl;
+        send_response(client_socket, 502, client_IP, request_line);
+        return -1;
+    }
+
+    void *addr;
+    if (p->ai_family == AF_INET) {
+        struct sockaddr_in *ipv4 = (struct sockaddr_in *)p->ai_addr;
+        addr = &(ipv4->sin_addr);
+    } else {
+        struct sockaddr_in6 *ipv6 = (struct sockaddr_in6 *)p->ai_addr;
+        addr = &(ipv6->sin6_addr);
+    }
+
+    // convert the IP address to a string and print it out
+    inet_ntop(p->ai_family, addr, ipstr, sizeof ipstr);
+    cerr << "found ip address: " << ipstr << endl;
+    
+
+    cerr << "Looking for ip address in forbidden sites list\n";
     //look for ip on forbidden sites list
-    if(find_in_hashtable(ip_str)){
+    if(find_in_hashtable(ipstr)){
         //if we found host in forbidden sites list
         send_response(client_socket, 403, client_IP, request_line);
         return -1;
     }
 
-    int connect_status = connect(sockfd, result->ai_addr, result->ai_addrlen);
-    if(connect_status == -1){
-        send_response(client_socket, 504, client_IP, request_line); //send connect timeout error
-        return -1;
-    }
-
+    cerr << "Establishing an SSL connection\n";
     // Establish SSL connection
     SSL *ssl = SSL_new(sslctx);
     if (!ssl) {
@@ -482,13 +501,10 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
         return -1;
     }
     SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
-    
 
-    //change request to Connection: close, so that we know when the client is done sending bytes
-    string new_request = change_request(original_client_request);
-
+    cerr << "Writing request to server\n";
     //handshake done, now we can read/write bytes to connection
-    if(!SSL_write(ssl, new_request.c_str(), strlen(original_client_request.c_str()))){ //write original request to ssl connection
+    if(!SSL_write(ssl, original_client_request.c_str(), strlen(original_client_request.c_str()))){ //write original request to ssl connection
         cout << "SSL_write error\n";
         send_response(client_socket, 5, client_IP, request_line); //send ssl error to client
         return -1;
@@ -497,47 +513,71 @@ int setup_SSL_connection(string host, string port, int client_socket, string ori
     int num_bytes;
     int total_bytes = 0;
     char buffer[RESPONSE_SIZE];
-    int response_line_flag = 0;
-    char response_line[1000];
+    // int response_line_flag = 0;
+    // char response_line[1000];
+    int content_length = 0;
+    bool chunked_encoding = false;
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(sockfd, &readfds);
 
+    struct timeval timeout;
+    timeout.tv_sec = 5; // set the timeout value to 5 seconds
+    timeout.tv_usec = 0;
+
+    cerr << "Receving response from server\n";
     while (1) {
-        //check if global version number matches the local version number, if it does not, we need to check again to make sure our site is not now banned
-        if(local_version_num != version_number_global){
-            //time for another check
-            if(find_in_hashtable(ip_str) || find_in_hashtable(host)){
-                //if we found host or IP in forbidden sites list
-                send_response(client_socket, 403, client_IP, request_line);
-                return -1;
-            }
-            local_version_num = version_number_global; //we're good until the global changes again
-        }
-        num_bytes = SSL_read(ssl, buffer, RESPONSE_SIZE);
-        total_bytes += num_bytes;
-        if(num_bytes == 0){
+        
+        int ret = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
+
+        if(ret == 0){
+            //timeout, exit
+            cerr << "timeout\n";
             break;
         }
-        //get response line
-        if(response_line_flag == 0){
-            for(int i = 0; i < num_bytes; i++){
-                if(response_line_flag == 1){
-                    break;
-                }
-                if(buffer[i+1] == '\r' && buffer[i+2] == '\n'){ //we got request line
-                    response_line_flag = 1;
-                }
-                response_line[i] = buffer[i];
+
+        num_bytes = SSL_read(ssl, buffer, RESPONSE_SIZE);
+        send(client_socket, buffer, num_bytes, 0);
+        total_bytes += num_bytes;
+        // Check if the response uses chunked encoding
+        if (strstr(buffer, "Transfer-Encoding: chunked")) {
+            chunked_encoding = true;
+        }
+        // Parse the Content-Length header if it exists
+        char *content_length_ptr = strstr(buffer, "Content-Length: ");
+        if (content_length_ptr != NULL) {
+            content_length = atoi(content_length_ptr + 16);
+        }
+
+        //if chunked encoding, look for the last chunk
+        if(chunked_encoding){
+            char* p = buffer + total_bytes - num_bytes;
+            int chunk_size = strtol(p, &p, 16);
+            if (chunk_size == 0) {
+                cerr << "got last chunk" << endl;
             }
         }
-        send(client_socket, buffer, num_bytes, 0);
+
+        // Break out of the loop once we have received the full response
+        if (!chunked_encoding && total_bytes >= content_length) {
+            break;
+        }
         memset(&buffer, 0, sizeof(buffer));
     }
 
-    int status_code = 0;
+    if(chunked_encoding){
+        cout << "chunked encoding" << endl;
+    }else{
+        cout << "content-length: " << content_length << endl;
+    }
 
-    sscanf(response_line, "%*s %d %*s", &status_code);
+    // int status_code = 0;
 
-    write_to_logfile(total_bytes, client_IP, request_line, status_code);
+    // sscanf(response_line, "%*s %d %*s", &status_code);
 
+    // write_to_logfile(total_bytes, client_IP, request_line, status_code);
+
+    cerr << "Response finished, shutting down SSL connection\n\n";
     //shutdown
     SSL_shutdown(ssl);
     SSL_free(ssl);
